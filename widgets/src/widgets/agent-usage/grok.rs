@@ -1228,6 +1228,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale,
             projected,
             apart: false,
+            pool_key: if d.spacexsi.unified() { crate::shared::SPACEXSI_POOL_KEY } else { "credits" }.into(),
+            fetched_at: q.taken.unwrap_or(0.0),
+            ..Lane::default()
         });
     }
     // The allowance that costs money, on the same window as the credits
@@ -1244,9 +1247,32 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale,
             projected,
             apart: false,
+            pool_key: "on_demand".into(),
+            unit: Unit::Money { currency: "USD".into(), exponent: 2 },
+            role: PoolRole::Overage,
+            used: Some(q.on_demand_used.unwrap_or(0.0)),
+            limit: Some(cap),
+            fetched_at: q.taken.unwrap_or(0.0),
         });
     }
     out
+}
+
+/// Whether the quota on screen is the server's answer rather than a figure
+/// the log recorded - which the history keeps as `cached`.
+pub fn quota_is_live(d: &Data) -> bool {
+    d.quota_live
+}
+
+/// What the history needs from Grok beyond its lanes: the account the token
+/// names, the tier, and why the figure is not the server's.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let plan = d
+        .quota
+        .as_ref()
+        .filter(|q| !q.tier.is_empty())
+        .and_then(|q| Some(crate::history::PlanReading { at: q.taken.filter(|t| *t > 0.0)?, plan: q.tier.clone() }));
+    crate::history::Facts { account_id: account_id().unwrap_or_default(), plan, bank: None, why: d.quota_why.clone() }
 }
 
 /// True when nothing is asking the server on the reader's behalf, so the

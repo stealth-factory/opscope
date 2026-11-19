@@ -2005,6 +2005,48 @@ not — it is simply the largest.
 Every bar carries its label and its number, so colour is never the only thing
 saying what a row is, and the pace mark is a glyph before it is a colour.
 
+## Utilisation history
+
+The quota bars say where each allowance stands now. The history remembers how
+each one ended. As a by-product of the readings the pane already fetches - no
+extra request, nothing redeemed - every pass writes what changed to
+`~/.local/state/opscope/agent-usage-history.sqlite`, readable only by you,
+kept for as long as the file is.
+
+A reading is written when its figure, an amount, its window or its reset
+instant changed, or when an hour has passed with nothing changing - proof the
+pane was watching through a flat stretch - and never more than once in five
+minutes per quota. Each is stamped with the time it was fetched, not the time
+the pane read it, so a laptop that slept or a reading another pane fetched
+lands where it belongs. A worked-out (`~`) window is never written; a cached
+reading is written as cached; a quota absent from a pass writes nothing.
+
+Accounts are kept apart by the provider's own account id - two Claude config
+directories signed into one account share one history, and two accounts never
+mix. On the unified Cursor and Grok plan the history is kept under SpaceXSI as
+well as under each product.
+
+From the readings it works out each cycle: where it began and ended, whether
+the next began where the last ended or at first use after a gap, how much of
+it was watched, and whether the last figure was taken so long before the end
+that it is only a lower bound. Windows nobody saw on a calendar-like quota are
+kept as empty cycles rather than guessed at.
+
+For now each agent's tab ends in one dim line, `history since 19 Nov 2026`.
+Charts come later. A file written by a newer opscope is left alone and the
+line says so; a damaged one is renamed beside it, never deleted, and the line
+says that too.
+
+Four settings tune how resets will be told from noise, and are read once reset
+detection lands:
+
+| key | default | what it does |
+|---|---|---|
+| `history_watch_gap` | `15` | minutes. Two readings this close are "watching": data was flowing, so little can have happened unseen. Further apart is "offline" |
+| `history_near_zero` | `1` | percentage points. While watching, a reset reads as a figure falling back to at most this |
+| `history_offline_fall` | `3` | percentage points. After an offline gap, a fall of at least this - or `history_offline_fall_pct` of the earlier figure, whichever is larger - counts |
+| `history_offline_fall_pct` | `5` | percent of the earlier figure, the other half of the offline fall |
+
 ## The thing this widget does not do
 
 Nothing on this pane invents a denominator. Where an agent publishes a limit it

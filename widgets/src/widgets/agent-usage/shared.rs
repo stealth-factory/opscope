@@ -969,6 +969,81 @@ pub struct Lane {
     /// allowance that is not a fourth slice of them. Carried on the lane so
     /// the agent's own tab and the summary cannot drift apart on it.
     pub apart: bool,
+    /// The provider's own id for this limit, never the drawn label: Claude's
+    /// `limits[].kind` plus its scope model, Codex's `primary_window`, a
+    /// Cursor field name. The history keys a pool on it, so a label that is
+    /// reworded on screen does not start a new history.
+    pub pool_key: String,
+    /// What `used` and `limit` are counted in. `Pct` when the provider sends
+    /// a percentage and no amounts.
+    pub unit: Unit,
+    /// Whether this is a periodic allowance, spend past one, or a balance.
+    pub role: PoolRole,
+    /// The amount used and the ceiling, in `unit`, where the provider sent
+    /// them. `None` is "not sent", never zero.
+    pub used: Option<f64>,
+    pub limit: Option<f64>,
+    /// When the reading behind this lane was fetched, as epoch seconds: the
+    /// provider's answer, or the cache it came from - not this pass. Zero
+    /// when nobody knows, and the history then writes nothing for the lane
+    /// rather than date it to the pass.
+    pub fetched_at: f64,
+}
+
+/// What a lane's amounts are counted in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Unit {
+    /// A percentage and nothing else.
+    #[default]
+    Pct,
+    /// Money, in major units of `currency` (dollars, not cents). `exponent`
+    /// is how many minor places the currency is written with.
+    Money { currency: String, exponent: i32 },
+    Credits,
+    Requests,
+    Tokens,
+}
+
+impl Unit {
+    /// The name the history stores.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Unit::Pct => "pct",
+            Unit::Money { .. } => "money",
+            Unit::Credits => "credits",
+            Unit::Requests => "requests",
+            Unit::Tokens => "tokens",
+        }
+    }
+}
+
+/// What part of a plan a lane is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PoolRole {
+    /// An allowance that refills on a clock: the 5h session, the week.
+    #[default]
+    Included,
+    /// Spend past the allowance: Claude's extra usage, Cursor's on-demand.
+    Overage,
+    /// A balance with no cycle: prepaid or purchased credits.
+    Balance,
+}
+
+impl PoolRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            PoolRole::Included => "included",
+            PoolRole::Overage => "overage",
+            PoolRole::Balance => "balance",
+        }
+    }
+}
+
+/// When the reading held under `key` was taken, or zero before there is
+/// one. The fetch time a lane carries, for readers whose answer does not
+/// date itself.
+pub fn taken_at(caches: &Caches, key: &str) -> f64 {
+    caches.readings.live.get(key).map(|(at, _, _)| *at).unwrap_or(0.0)
 }
 
 /// The heading the unified Cursor and Grok plan is drawn under.
@@ -980,6 +1055,10 @@ pub struct Lane {
 /// and a heading taken from whichever answered first would rename the
 /// section depending on which tab was refreshed last.
 pub const SPACEXSI: &str = "SpaceXSI";
+
+/// The history's key for the unified plan's weekly pool, given by both
+/// Cursor's and Grok's reading of it so the two land in one pool.
+pub const SPACEXSI_POOL_KEY: &str = "weekly_pool";
 
 /// Where an agent stands relative to the unified plan.
 ///

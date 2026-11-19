@@ -93,6 +93,14 @@ pub struct Data {
     daily: HashMap<String, HashMap<String, Tokens>>,
     /// How current the rollouts behind the totals are.
     pub history: History,
+    /// When `live` was fetched.
+    pub fetched_at: f64,
+    /// The account's `account_id` from `auth.json`: stable across token
+    /// refreshes, which the shared-reading key is not.
+    pub account_id: String,
+    /// The reset-credit inventory as the server sent it, and when: the
+    /// history diffs it by credit.
+    pub bank_raw: Option<(f64, String)>,
 }
 
 impl Data {
@@ -581,6 +589,9 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut refuse = String::new();
     let mut live_why = String::new();
     let mut bank = None;
+    // The inventory body as the server sent it, for the history: the raw
+    // credit list, not the bank this machine's clock filtered.
+    let mut bank_body: Option<String> = None;
     // Set inside the fetch, which `cached` does not run on a held reading.
     // A usage miss still carries the inventory body for this frame.
     let mut carried_bank: Option<String> = None;
@@ -604,20 +615,25 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     }) {
         Some(got) if !text(&got, "why").is_empty() => {
             live_why = text(&got, "why");
-            bank = bank_of(got["bank"].as_str(), now());
+            bank_body = got["bank"].as_str().map(str::to_string);
+            bank = bank_of(bank_body.as_deref(), now());
             None
         }
         Some(got) if got.get("u").is_some() => {
-            bank = bank_of(got["bank"].as_str(), now());
+            bank_body = got["bank"].as_str().map(str::to_string);
+            bank = bank_of(bank_body.as_deref(), now());
             Some(got["u"].clone())
         }
         other => {
             if let Some(got) = other.as_ref() {
-                bank = bank_of(got["bank"].as_str(), now());
+                bank_body = got["bank"].as_str().map(str::to_string);
+                bank = bank_of(bank_body.as_deref(), now());
             }
             other
         }
     };
+    // When the reading on screen was fetched - by this pane or another.
+    let fetched_at = taken_at(caches, &key);
     if !refuse.is_empty() {
         live_why = refuse.clone();
         remember_refusal(caches, &key, &refuse);
@@ -626,12 +642,18 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         if let Some(body) = carried_bank.clone() {
             set_live(caches, &key, serde_json::json!({"why": &refuse, "bank": body}));
             bank = bank_of(Some(&body), now());
+            bank_body = Some(body.clone());
         }
     }
+    let bank_at = taken_at(caches, &key);
+    let account_id = auth.as_ref().map(|a| text(&a["tokens"], "account_id")).unwrap_or_default();
     let mut codex = Data {
         live,
         live_why,
         bank,
+        bank_raw: bank_body.map(|body| (bank_at, body)),
+        fetched_at,
+        account_id,
         ..Data::default()
     };
     // Every rollout, not a window of them: the tab's TOTALS and its
@@ -1409,6 +1431,12 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: true,
             projected: false,
             apart: false,
+            // The rollout's `primary` is the live call's `primary_window`.
+            pool_key: "primary_window".into(),
+            // Written when Codex last spoke to the server: the rollout's
+            // own modification time is the nearest fact to that.
+            fetched_at: d.last,
+            ..Lane::default()
         }];
     };
     let mut out: Vec<Lane> = Vec::new();
@@ -1426,6 +1454,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: false,
+            pool_key: key.into(),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     for extra in live["additional_rate_limits"]
@@ -1454,9 +1485,29 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: false,
+            pool_key: format!("additional:{}", text(extra, "limit_name")),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// What the history needs from Codex beyond its lanes: the stable account
+/// id, the plan, the raw bank, and why readings stopped.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let plan = d
+        .live
+        .as_ref()
+        .map(|l| text(l, "plan_type"))
+        .filter(|p| !p.is_empty())
+        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+    let bank = d
+        .bank_raw
+        .as_ref()
+        .filter(|(at, _)| *at > 0.0)
+        .and_then(|(at, body)| crate::parse::parse_codex_bank_raw(body, *at));
+    crate::history::Facts { account_id: d.account_id.clone(), plan, bank, why: d.live_why.clone() }
 }
 
 /// The whole tab: the quota, what this machine recorded, what it cost, and

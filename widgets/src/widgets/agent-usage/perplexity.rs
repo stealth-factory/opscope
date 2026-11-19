@@ -100,6 +100,8 @@ pub struct Data {
     subscription_why: String,
     /// When the reading was taken.
     read_at: f64,
+    /// When the weekly limit's reading was taken.
+    quota_at: f64,
     /// Where the cookie came from: `config`, `env`, or empty for none.
     source: &'static str,
     /// The variable read, when `source` is `env`.
@@ -296,6 +298,8 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         refused.clear();
     }
     d.quota_why = refused;
+    // When the weekly reading was fetched; a kept one carries its own.
+    d.quota_at = got.as_ref().map(|g| num(g, "at")).filter(|at| *at > 0.0).unwrap_or_else(|| taken_at(caches, &qkey));
     // The plan is only a label in the heading, but a session that failed
     // is said, so it is not taken for one that names no plan.
     let pkey = format!("{key}:plan");
@@ -426,6 +430,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: q.resets.is_some_and(|r| r <= now()) || d.quota_kept.is_some(),
             projected: false,
             apart: false,
+            pool_key: "weekly".into(),
+            fetched_at: d.quota_kept.as_ref().map_or(d.quota_at, |k| k.at),
+            ..Lane::default()
         });
     }
     let Some(c) = d.credits.as_ref() else {
@@ -441,9 +448,15 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: length.and(c.renews).is_some_and(|r| r <= now()) || d.kept.is_some(),
             projected: false,
             apart: false,
+            pool_key: "recurring".into(),
+            unit: Unit::Credits,
+            used: Some(c.recurring.used),
+            limit: Some(c.recurring.total),
+            fetched_at: d.read_at,
+            ..Lane::default()
         });
     }
-    for (label, pool) in [("credits", &c.purchased), ("bonus", &c.bonus)] {
+    for (label, key, pool) in [("credits", "purchased", &c.purchased), ("bonus", "bonus", &c.bonus)] {
         if pool.total > 0.0 {
             out.push(Lane {
                 label: label.into(),
@@ -453,10 +466,31 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 stale: d.kept.is_some(),
                 projected: false,
                 apart: false,
+                pool_key: key.into(),
+                unit: Unit::Credits,
+                role: PoolRole::Balance,
+                used: Some(pool.used),
+                limit: Some(pool.total),
+                fetched_at: d.read_at,
             });
         }
     }
     out
+}
+
+/// What the history needs from Perplexity beyond its lanes. No stable
+/// account id is read, so the account is keyed on the profile.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    crate::history::Facts {
+        account_id: String::new(),
+        plan: d
+            .plan
+            .clone()
+            .filter(|p| !p.is_empty() && d.read_at > 0.0)
+            .map(|plan| crate::history::PlanReading { at: d.read_at, plan }),
+        bank: None,
+        why: if d.why.is_empty() { d.quota_why.clone() } else { d.why.clone() },
+    }
 }
 
 impl Data {

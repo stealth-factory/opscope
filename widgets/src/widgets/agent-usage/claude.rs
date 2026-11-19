@@ -85,6 +85,11 @@ pub struct Data {
     daily: HashMap<String, HashMap<String, Tokens>>,
     /// How current the transcripts behind `daily` and `rates` are.
     pub history: History,
+    /// The account this directory is signed in as, by its stable uuid: the
+    /// profile's `account.uuid`, else Claude Code's own `oauthAccount`
+    /// record. Empty when neither says, and the history then keys on the
+    /// directory instead. Never the credential, which rotates.
+    pub account_id: String,
 }
 
 impl Data {
@@ -1158,6 +1163,7 @@ fn read_one(
             }));
         }
     }
+    claude.account_id = account_id_of(claude.profile.as_ref(), read_json(&json).as_ref());
     match read_json(&stats_path(&dir.path)) {
         Some(stats) => {
             claude.ok = true;
@@ -1174,6 +1180,62 @@ fn read_one(
     claude.daily = built.daily;
     claude.history = built.history;
     claude
+}
+
+/// What the history needs from one Claude account beyond its lanes: the
+/// stable account id, the plan by its raw ids (`max/default_claude_max_20x`,
+/// so a renamed plan is not a plan change), the raw bank, and why readings
+/// stopped. All dated by the quota reading.
+pub fn history_facts(c: &Data) -> crate::history::Facts {
+    let at = c.quota_at;
+    let (plan, tier) = plan_ids(c);
+    let plan = match (plan.is_empty(), tier.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => plan,
+        (true, false) => tier,
+        (false, false) => format!("{plan}/{tier}"),
+    };
+    crate::history::Facts {
+        account_id: c.account_id.clone(),
+        plan: (at > 0.0 && !plan.is_empty()).then(|| crate::history::PlanReading { at, plan }),
+        bank: c
+            .quota
+            .as_ref()
+            .filter(|_| at > 0.0)
+            .and_then(|q| crate::parse::parse_claude_bank_raw(&q.to_string(), at)),
+        why: c.quota_why.clone(),
+    }
+}
+
+/// The provider's own id for a limit: its `kind`, and the scoped model's id
+/// (or name, where no id is sent) for a model-scoped one. Never the label,
+/// which is reworded on screen.
+fn claude_pool_key(limit: &serde_json::Value) -> String {
+    let kind = match text(limit, "kind") {
+        k if k.is_empty() => text(limit, "group"),
+        k => k,
+    };
+    let model = &limit["scope"]["model"];
+    let scoped = match text(model, "id") {
+        id if id.is_empty() => text(model, "display_name"),
+        id => id,
+    };
+    if scoped.is_empty() { kind } else { format!("{kind}:{scoped}") }
+}
+
+/// The account a directory is signed in as, by its stable uuid.
+///
+/// The profile's `account.uuid` first, since it is the server's answer for
+/// the token this pass holds; then the `oauthAccount.accountUuid` Claude
+/// Code writes beside its config, which needs no network. Empty when
+/// neither has one - the history then keys on the directory, not on a
+/// credential that rotates.
+pub fn account_id_of(profile: Option<&serde_json::Value>, config: Option<&serde_json::Value>) -> String {
+    let from_profile = profile.map(|p| text(&p["account"], "uuid")).unwrap_or_default();
+    if !from_profile.is_empty() {
+        return from_profile;
+    }
+    config.map(|c| text(&c["oauthAccount"], "accountUuid")).unwrap_or_default()
 }
 
 /// Where a Claude limit belongs in the list, shortest leash first.
@@ -2633,7 +2695,10 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
                 reset: rolled.0,
                 stale: reading_is_old(c.quota_at),
                 projected: rolled.1,
-                            apart: false,
+                apart: false,
+                pool_key: claude_pool_key(l),
+                fetched_at: c.quota_at,
+                ..Lane::default()
             }
         })
         .collect();
@@ -2654,8 +2719,23 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
     //
     // Last, not ranked: Claude's lanes are read in the order the account's
     // own limits nest, and this is not one of them.
-    if let Some((pct, cap)) = extra_lane(&extra_state(u)) {
+    let extra = extra_state(u);
+    if let Some((pct, cap)) = extra_lane(&extra) {
+        let (used, limit, unit) = match &extra {
+            Extra::Fixed { used, limit, currency, places, .. } => (
+                Some(*used),
+                Some(*limit),
+                Unit::Money { currency: currency.clone(), exponent: *places as i32 },
+            ),
+            _ => (None, None, Unit::Pct),
+        };
         out.push(Lane {
+            pool_key: "extra_usage".into(),
+            unit,
+            role: PoolRole::Overage,
+            used,
+            limit,
+            fetched_at: c.quota_at,
             label: format!("extra{}", cap),
             pct,
             window_secs: None,
@@ -2686,6 +2766,33 @@ pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The history keys an account on its uuid, never the credential: the
+    /// profile's first, then Claude Code's own record (OPS-304).
+    #[test]
+    fn the_account_id_is_the_uuid_from_the_profile_or_claude_codes_record() {
+        let profile = serde_json::json!({"account": {"uuid": "acct-a"}, "organization": {"uuid": "org-a"}});
+        let config = serde_json::json!({"oauthAccount": {"accountUuid": "acct-b"}});
+        assert_eq!(account_id_of(Some(&profile), Some(&config)), "acct-a");
+        assert_eq!(account_id_of(None, Some(&config)), "acct-b");
+        let local = serde_json::json!({"_plan": "max", "_local": true});
+        assert_eq!(account_id_of(Some(&local), Some(&config)), "acct-b");
+        assert_eq!(account_id_of(None, None), "");
+    }
+
+    /// A pool is keyed on the server's kind and scope, not the label.
+    #[test]
+    fn a_pool_key_is_the_limits_kind_and_scoped_model() {
+        assert_eq!(claude_pool_key(&serde_json::json!({"kind": "session", "group": "session"})), "session");
+        assert_eq!(
+            claude_pool_key(&serde_json::json!({"kind": "weekly_model", "scope": {"model": {"id": "m-1", "display_name": "Fable"}}})),
+            "weekly_model:m-1"
+        );
+        assert_eq!(
+            claude_pool_key(&serde_json::json!({"kind": "weekly_model", "scope": {"model": {"display_name": "Fable"}}})),
+            "weekly_model:Fable"
+        );
+    }
 
     /// A reading carrying the token signed in under the directory it was
     /// read from is never written to the store the other panes read

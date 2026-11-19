@@ -500,6 +500,10 @@ pub struct Data {
     /// How current the prompt count is.
     pub prompts_history: History,
     last: f64,
+    /// When `quota` and `gemini` were each fetched, from whichever source
+    /// answered.
+    fetched_at: f64,
+    gemini_at: f64,
 }
 
 /// Whether a command line belongs to Antigravity's language server.
@@ -954,6 +958,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
             .as_ref()
             .map(|file| text(file, "auth_method"))
             .unwrap_or_default(),
+        fetched_at: taken_at(caches, "antigravity-quota"),
         ..Data::default()
     };
     // Local first: it is the app's own answer and moves as the app is used.
@@ -998,6 +1003,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                 Some(serde_json::Value::Array(groups)) => {
                     d.quota = groups;
                     d.quota_from = From::Agy;
+                    d.fetched_at = taken_at(caches, KEY);
                 }
                 held => {
                     agy_why = held.map(|v| text(&v, "why")).unwrap_or(asked);
@@ -1031,6 +1037,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                     Some(groups) => {
                         d.quota = groups;
                         d.quota_from = From::Google;
+                        d.fetched_at = taken_at(caches, "antigravity-remote");
                     }
                     None => {
                         why = if asked.is_empty() {
@@ -1063,6 +1070,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                 Some(groups) => {
                     d.quota = groups;
                     d.quota_from = From::Agy;
+                    d.fetched_at = taken_at(caches, "antigravity-agy");
                     why.clear();
                 }
                 // Both failed. The CLI's reason is the later and more
@@ -1116,7 +1124,10 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                     _ if !refused.is_empty() => {
                         d.gemini_why = format!("Google refused the per-model quota: {}", refused)
                     }
-                    Some(models) if !models.is_empty() => d.gemini = models,
+                    Some(models) if !models.is_empty() => {
+                        d.gemini = models;
+                        d.gemini_at = taken_at(caches, KEY);
+                    }
                     Some(_) => d.gemini_why = "Google lists no Gemini models for this account".into(),
                     None => d.gemini_why = "Google's per-model quota came back unreadable".into(),
                 }
@@ -1208,6 +1219,10 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 stale: false,
                 projected: false,
                 apart: group_start > 0 && out.len() == group_start,
+                // The group's own name and the bucket's window, as sent.
+                pool_key: format!("{display}:{window}"),
+                fetched_at: d.fetched_at,
+                ..Lane::default()
             });
         }
     }
@@ -1230,9 +1245,26 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: !out.is_empty(),
+            // Whichever model is busiest this pass: one lane, one pool.
+            pool_key: "gemini_busiest".into(),
+            fetched_at: d.gemini_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// What the history needs from Antigravity beyond its lanes. No stable
+/// account id is read, so the account is keyed on the profile; the plan is
+/// the Code Assist tier.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let tier = d
+        .live
+        .as_ref()
+        .map(|l| text(&l["currentTier"], "id"))
+        .filter(|t| !t.is_empty() && d.fetched_at > 0.0)
+        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+    crate::history::Facts { account_id: String::new(), plan: tier, bank: None, why: d.quota_why.clone() }
 }
 
 /// Whether the summary carries a Gemini group of its own. The local server's
@@ -2540,6 +2572,8 @@ mod tests {
             local_refused: false,
             gemini: Vec::new(),
             gemini_why: String::new(),
+            fetched_at: now() - 60.0,
+            gemini_at: 0.0,
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");

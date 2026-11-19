@@ -75,6 +75,8 @@ pub struct Data {
     live_why: String,
     /// Set when `live` is a reading kept from an earlier pass.
     live_kept: Option<Kept>,
+    /// When `live` was fetched: a kept reading's own time.
+    fetched_at: f64,
     sessions: i64,
     events: i64,
     /// None until an event has been read - a locked store and an empty one
@@ -217,6 +219,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             }
         }
     }
+    d.fetched_at = match d.live_kept.as_ref() {
+        Some(k) => k.at,
+        None => taken_at(caches, &key),
+    };
     read_store_at(&copilot_db(), &mut d);
     d
 }
@@ -395,10 +401,35 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             reset: stamp,
             stale: d.live_kept.is_some(),
             projected: false,
-                    apart: false,
+            apart: false,
+            pool_key: key.clone(),
+            unit: Unit::Requests,
+            used: snap["entitlement"]
+                .as_f64()
+                .zip(snap["remaining"].as_f64())
+                .map(|(ent, left)| ent - left),
+            limit: snap["entitlement"].as_f64(),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// What the history needs from Copilot beyond its lanes: the GitHub login
+/// the quota belongs to, the plan, and why the call is not answering.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let live = d.live.as_ref();
+    let plan = live
+        .map(|l| text(l, "copilot_plan"))
+        .filter(|p| !p.is_empty() && d.fetched_at > 0.0)
+        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+    crate::history::Facts {
+        account_id: live.map(|l| text(l, "login")).unwrap_or_default(),
+        plan,
+        bank: None,
+        why: d.live_why.clone(),
+    }
 }
 
 /// Which subscription this quota belongs to, and since when.

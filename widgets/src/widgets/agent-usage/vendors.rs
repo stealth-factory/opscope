@@ -48,6 +48,9 @@ pub struct State {
     /// vendor -> where the readings its section shows came from. Claude
     /// keeps its own on each account's `Data`.
     pub freshness: HashMap<String, Vec<tc::readings::Provenance>>,
+    /// How far back each tab's utilisation history goes, and why it is not
+    /// being written when it is not. Set by the poller after the pass.
+    pub history: crate::history::Status,
 }
 
 /// Whether Notion may be asked, on the same terms: it sends the reader's
@@ -139,6 +142,7 @@ pub fn read_all(
         err: String::new(),
         sharing: Vec::new(),
         freshness,
+        history: crate::history::Status::default(),
     };
     link_spacexsi(&mut state);
     state
@@ -409,6 +413,145 @@ fn lanes_of(name: &str, s: &State) -> Vec<Lane> {
         "droid" => crate::droid::lanes(&s.droid),
         _ => Vec::new(),
     }
+}
+
+/// The tab a Cursor or Grok account is drawn on, by where it stands
+/// relative to the unified plan - the names [`spacexsi_tabs`] gives.
+fn vendor_tab(name: &str, place: Spacexsi) -> String {
+    match place {
+        Spacexsi::No => name.to_string(),
+        Spacexsi::Separate => format!("spacexsi:{name}"),
+        Spacexsi::Alone | Spacexsi::Shared => "spacexsi".to_string(),
+    }
+}
+
+/// This pass, as the history reads it: one observation per account of each
+/// provider that is present here and was asked (OPS-304).
+///
+/// Lanes come from [`lanes_of`], so the history records exactly what the
+/// summary draws; the rest from each provider's `history_facts`. `now` dates
+/// only the watch state, which is about this pass rather than a fetch.
+pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
+    use crate::history::{Facts, Observation, WatchReading};
+    let present = |name: &str| s.installed.get(name).is_some_and(|p| p.present);
+    let watch = |facts: &Facts, lanes: &[Lane]| -> Option<WatchReading> {
+        if facts.why.is_empty() && lanes.is_empty() {
+            return None;
+        }
+        Some(WatchReading {
+            at: now,
+            state: crate::parse::parse_watch_state(&facts.why).to_string(),
+            reason: facts.why.clone(),
+        })
+    };
+    let build = |provider: &str, tab: String, heading: String, profile: String, lanes: Vec<Lane>, facts: Facts| {
+        let watch = watch(&facts, &lanes);
+        Observation {
+            provider: provider.to_string(),
+            account_id: facts.account_id,
+            profile,
+            heading,
+            tab,
+            lanes,
+            bank: facts.bank,
+            plan: facts.plan,
+            watch,
+            ..Observation::default()
+        }
+    };
+    // A provider the reader left out says so in its reason, and is not an
+    // account the history should know about.
+    let asked = |facts: &Facts, lanes: &[Lane]| !lanes.is_empty() || facts.bank.is_some() || !facts.why.starts_with("not asked");
+    let mut out = Vec::new();
+    if present("claude") {
+        let multi = s.claude.len() > 1;
+        for d in &s.claude {
+            let tab = if d.label.is_empty() { "claude".to_string() } else { format!("claude:{}", d.label) };
+            let lanes = crate::claude::lanes(d);
+            let facts = crate::claude::history_facts(d);
+            if asked(&facts, &lanes) {
+                let heading = crate::claude::summary_heading(&d.label, multi);
+                out.push(build("claude", tab, heading, d.label.clone(), lanes, facts));
+            }
+        }
+    }
+    let simple: [(&str, fn(&State) -> Facts); 7] = [
+        ("codex", |s| crate::codex::history_facts(&s.codex)),
+        ("copilot", |s| crate::copilot::history_facts(&s.copilot)),
+        ("antigravity", |s| crate::antigravity::history_facts(&s.antigravity)),
+        ("notion", |s| crate::notion::history_facts(&s.notion)),
+        ("perplexity", |s| crate::perplexity::history_facts(&s.perplexity)),
+        ("devin", |s| crate::devin::history_facts(&s.devin)),
+        ("droid", |s| crate::droid::history_facts(&s.droid)),
+    ];
+    for (name, facts_of) in simple {
+        if !present(name) {
+            continue;
+        }
+        let lanes = lanes_of(name, s);
+        let facts = facts_of(s);
+        if asked(&facts, &lanes) {
+            out.push(build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts));
+        }
+    }
+    // Cursor and Grok, with the unified plan's copy where it applies
+    // (spec §3.4): both vendors of one shared account write SpaceXSI under
+    // Cursor's key, so the plan keeps one history.
+    let mut cursor_key: Option<String> = None;
+    for (name, place) in [("cursor", s.cursor.spacexsi), ("grok", s.grok.spacexsi)] {
+        if !present(name) {
+            continue;
+        }
+        let mut lanes = lanes_of(name, s);
+        let facts = if name == "cursor" {
+            crate::cursor::history_facts(&s.cursor)
+        } else {
+            // A figure the log recorded is a cached one, whatever its age.
+            if !crate::grok::quota_is_live(&s.grok) {
+                for lane in &mut lanes {
+                    lane.stale = true;
+                }
+            }
+            crate::grok::history_facts(&s.grok)
+        };
+        if !asked(&facts, &lanes) {
+            continue;
+        }
+        let mut o = build(name, vendor_tab(name, place), spacexsi_heading(name, place), String::new(), lanes, facts);
+        o.spacexsi = Some(place);
+        if name == "cursor" {
+            cursor_key = Some(o.account_key());
+        }
+        o.spacexsi_account = match place {
+            Spacexsi::No => None,
+            Spacexsi::Shared => cursor_key.clone().or_else(|| Some(o.account_key())),
+            Spacexsi::Alone | Spacexsi::Separate => Some(o.account_key()),
+        };
+        out.push(o);
+    }
+    out
+}
+
+/// The dim line under a tab saying how far back its history goes, and why
+/// it is not being written when it is not. Nothing before the first sample.
+fn history_rows(name: &str, s: &State, w: usize, p: &Palette) -> Vec<String> {
+    let mut words: Vec<String> = Vec::new();
+    if let Some(at) = s.history.since.get(name) {
+        words.push(crate::history::since_text(*at));
+    }
+    if let Some(note) = &s.history.note {
+        words.push(note.clone());
+    }
+    if words.is_empty() {
+        return Vec::new();
+    }
+    // Wrapped at spaces, a word longer than the pane broken by hand, so a
+    // narrow pane wraps rather than cuts.
+    let room = w.saturating_sub(2).max(1);
+    tc::wrap_words(&words.join(" · "), room)
+        .into_iter()
+        .map(|line| tc::seg(&[(p.dim.as_str(), format!(" {line}"))], w.saturating_sub(1).max(1)))
+        .collect()
 }
 
 /// Every agent's quotas on one screen, worst first.
@@ -963,6 +1106,18 @@ fn token_agents_hint(cfg: &Config, shown: &[&str], w: usize, p: &Palette) -> Vec
 pub fn tab_body_with_plots(name: &str, s: &State, w: usize, h: usize, cfg: &Config, p: &Palette, tabs: &[String], plots: &mut Vec<tc::Plot>) -> Vec<String> {
     let first = plots.len();
     let mut body = tab_rows(name, s, w, h, cfg, p, tabs, plots);
+    // The history so far, under everything else (OPS-304). Phase 3 draws
+    // its charts here.
+    if name != SUMMARY_TAB {
+        let since = history_rows(name, s, w, p);
+        if !since.is_empty() {
+            // Appended only: a trailing blank row may be a plot's.
+            if body.last().is_some_and(|r| !r.is_empty()) {
+                body.push(String::new());
+            }
+            body.extend(since);
+        }
+    }
     // Where this tab's readings came from, above them: nothing when every
     // one is this pane's own and fresh (OPS-290).
     let found = freshness_of(name, s, tabs);
@@ -1082,6 +1237,63 @@ fn unknown(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn present(names: &[&str]) -> HashMap<String, Presence> {
+        names.iter().map(|n| (n.to_string(), Presence { present: true })).collect()
+    }
+
+    #[test]
+    fn each_claude_account_is_its_own_observation_with_dated_keyed_lanes() {
+        let s = State {
+            claude: vec![
+                crate::claude::Data::with_session_quota("", 40),
+                crate::claude::Data::with_session_quota("work", 70),
+            ],
+            installed: present(&["claude"]),
+            ..State::default()
+        };
+        let obs = observations(&s, now());
+        assert_eq!(obs.len(), 2);
+        assert_eq!(obs[0].tab, "claude");
+        assert_eq!(obs[1].tab, "claude:work");
+        assert_eq!(obs[1].heading, "work - CLAUDE");
+        // No account id in a fixture: keyed on the profile, never merged.
+        assert_ne!(obs[0].account_key(), obs[1].account_key());
+        for o in &obs {
+            assert!(!o.lanes.is_empty());
+            for lane in &o.lanes {
+                assert!(!lane.pool_key.is_empty(), "{} has no pool key", lane.label);
+                assert!(lane.fetched_at > 0.0, "{} has no fetch time", lane.label);
+            }
+            assert_eq!(o.watch.as_ref().map(|w| w.state.as_str()), Some("ok"));
+        }
+    }
+
+    #[test]
+    fn an_absent_provider_is_not_observed() {
+        let s = State { claude: vec![crate::claude::Data::with_session_quota("", 40)], ..State::default() };
+        assert!(observations(&s, now()).is_empty());
+    }
+
+    #[test]
+    fn the_history_line_sits_under_the_tab_and_never_outgrows_the_pane() {
+        let p = palette();
+        let mut s = State::default();
+        s.history.since.insert("codex".into(), 1_763_510_400.0);
+        s.history.note = Some("history file was damaged (file is not a database); kept as agent-usage-history.sqlite.damaged-1763510400, started again".into());
+        for w in [12usize, 26, 40, 80] {
+            let rows = history_rows("codex", &s, w, &p);
+            // Nothing dropped: every character of the line is on screen,
+            // wrapped at spaces or, for a word wider than the pane, broken.
+            let squeezed: String = plain(&rows).concat().chars().filter(|c| !c.is_whitespace()).collect();
+            assert!(squeezed.contains("historysince"), "width {w}: {squeezed}");
+            assert!(squeezed.contains("agent-usage-history.sqlite.damaged-1763510400,startedagain"), "width {w}: {squeezed}");
+            for r in plain(&rows) {
+                assert!(tc::display_width(&r) < w, "width {w}: {r:?}");
+            }
+        }
+        assert!(history_rows("cursor", &State::default(), 80, &p).is_empty());
+    }
 
     #[test]
     fn the_overview_names_the_pasted_token_agents_discovery_cannot_find() {
@@ -1344,6 +1556,7 @@ mod tests {
             stale: false,
             projected: false,
             apart: false,
+            ..Lane::default()
         };
         // grok has more lanes and a higher total, and still ranks below the
         // provider with the single worst one - which a flat sort by
