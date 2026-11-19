@@ -324,7 +324,7 @@ impl Recorder {
     pub fn pass(&mut self, obs: &[Observation], t: &Thresholds, now: f64) -> Status {
         if self.history.is_none() && now - self.tried_at >= RETRY_OPEN {
             self.tried_at = now;
-            match store::History::open(&self.path) {
+            match store::History::open_with(&self.path, t) {
                 Ok(h) => {
                     // A damaged file set aside is said once, and kept said:
                     // a note that vanished on the next pass would be missed.

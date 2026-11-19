@@ -350,12 +350,19 @@ fn set_aside(path: &Path, at: i64, failed: Option<(u64, u64)>) -> Result<Option<
 }
 
 impl History {
-    /// Open the history, making and migrating it as needed. A damaged file
-    /// is renamed and a new one started; a newer one is left alone.
+    /// Open the history with the default thresholds: see [`History::open_with`].
     pub fn open(path: &Path) -> Result<History, OpenError> {
+        History::open_with(path, &Thresholds::default())
+    }
+
+    /// Open the history, making and migrating it as needed. A damaged file
+    /// is renamed and a new one started; a newer one is left alone. A file
+    /// folded by another detector, or with other thresholds than `t`, is
+    /// folded again with `t` - the configured ones, never the defaults.
+    pub fn open_with(path: &Path, t: &Thresholds) -> Result<History, OpenError> {
         let mut tries = 0;
         loop {
-            match History::open_once(path) {
+            match History::open_once(path, t) {
                 Ok(h) => return Ok(h),
                 Err(f) if f.damaged => {
                     let first = match &f.error {
@@ -372,7 +379,7 @@ impl History {
                         }
                         continue;
                     };
-                    let mut h = History::open_once(path).map_err(|f| f.error)?;
+                    let mut h = History::open_once(path, t).map_err(|f| f.error)?;
                     let name = aside
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -394,7 +401,7 @@ impl History {
         }
     }
 
-    fn open_once(path: &Path) -> Result<History, Failure> {
+    fn open_once(path: &Path, t: &Thresholds) -> Result<History, Failure> {
         use std::os::unix::fs::OpenOptionsExt;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Failure::other(format!("cannot make {}: {e}", dir.display())))?;
@@ -414,13 +421,13 @@ impl History {
         // The file as it is now, before SQLite opens it: what a damaged
         // verdict below is about.
         let id = identity(path);
-        History::open_conn(path, existed).map_err(|mut f| {
+        History::open_conn(path, existed, t).map_err(|mut f| {
             f.identity = id;
             f
         })
     }
 
-    fn open_conn(path: &Path, existed: bool) -> Result<History, Failure> {
+    fn open_conn(path: &Path, existed: bool, t: &Thresholds) -> Result<History, Failure> {
         let conn = Connection::open(path).map_err(Failure::from_sql)?;
         conn.busy_timeout(BUSY).map_err(Failure::from_sql)?;
         // The version first: a newer file is left exactly as it is, which
@@ -463,27 +470,14 @@ impl History {
             path: path.to_path_buf(),
             notice: None,
         };
-        h.refold_if_detector_changed(&Thresholds::default())
-            .map_err(Failure::other)?;
+        h.refold_if_detector_changed(t).map_err(Failure::other)?;
         Ok(h)
     }
 
-    /// Fold every pool again when the file was folded by another detector.
+    /// Fold every pool again when the file was folded by another detector
+    /// or with other thresholds, in a transaction of its own.
     fn refold_if_detector_changed(&mut self, t: &Thresholds) -> Result<(), String> {
-        // Read as text, as `meta_set` writes it; anything unreadable is
-        // simply not this detector.
-        let stamped = |c: &Connection| -> Result<Option<i64>, String> {
-            let v: Option<String> = c
-                .query_row(
-                    "SELECT CAST(v AS TEXT) FROM meta WHERE k = 'detector_version'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(sql)?;
-            Ok(v.and_then(|v| v.parse().ok()))
-        };
-        if stamped(&self.conn)? == Some(fold::DETECTOR_VERSION) {
+        if !stale(&self.conn, t)? {
             return Ok(());
         }
         let tx = self
@@ -491,23 +485,7 @@ impl History {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
         // Another pane may have done it while this one waited.
-        if stamped(&tx)? != Some(fold::DETECTOR_VERSION) {
-            let pools: Vec<i64> = {
-                let mut st = tx.prepare("SELECT id FROM pool ORDER BY id").map_err(sql)?;
-                let rows = st.query_map([], |r| r.get(0)).map_err(sql)?;
-                rows.collect::<Result<_, _>>().map_err(sql)?
-            };
-            for pool in pools {
-                refold_pool(&tx, pool, None, t)?;
-            }
-            meta_set(&tx, "detector_version", &fold::DETECTOR_VERSION.to_string())?;
-            meta_set(&tx, "writer", env!("CARGO_PKG_VERSION"))?;
-            meta_set(
-                &tx,
-                "clocks",
-                "sample.at, bank_sample.at, plan_sample.at, watch_state.at: this machine's wall clock at fetch; reset_at: the server's",
-            )?;
-        }
+        refold_if_stale(&tx, t)?;
         tx.commit().map_err(sql)
     }
 
@@ -532,6 +510,8 @@ impl History {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
+        // Thresholds changed in the config since the file was folded.
+        refold_if_stale(&tx, t)?;
         let mut refold: Vec<(i64, f64)> = Vec::new();
         let mut account_refold: Vec<(i64, f64)> = Vec::new();
         let mut banks_changed: Vec<i64> = Vec::new();
@@ -651,6 +631,7 @@ impl History {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
+        refold_if_stale(&tx, t)?;
         let account = upsert_account(&tx, provider, account_key, heading, now)?;
         let mut refold: Vec<(i64, f64)> = Vec::new();
         for r in rows {
@@ -732,6 +713,73 @@ impl History {
             .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .unwrap_or(-1)
     }
+}
+
+/// What the derived tables were folded with: the thresholds, as text.
+fn fingerprint(t: &Thresholds) -> String {
+    format!("{t:?}")
+}
+
+/// The local zone's name, where this machine says one, and its offset now
+/// (§3.6 `meta`): the history's times are epoch seconds, and a report that
+/// groups them by day needs to know whose days.
+fn local_zone() -> (String, String) {
+    let name = std::env::var("TZ")
+        .ok()
+        .map(|z| z.trim_start_matches(':').to_string())
+        .filter(|z| !z.is_empty())
+        .or_else(|| {
+            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+                let p = p.to_string_lossy().into_owned();
+                p.split_once("zoneinfo/").map(|(_, z)| z.to_string())
+            })
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let offset = chrono::Local::now().format("%:z").to_string();
+    (name, offset)
+}
+
+/// Whether the file was folded by another detector or other thresholds.
+fn stale(c: &Connection, t: &Thresholds) -> Result<bool, String> {
+    // Read as text, as `meta_set` writes it; anything unreadable is simply
+    // not this detector.
+    let get = |k: &str| -> Result<Option<String>, String> {
+        c.query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [k], |r| r.get(0))
+            .optional()
+            .map(Option::flatten)
+            .map_err(sql)
+    };
+    let detector = get("detector_version")?.and_then(|v| v.parse::<i64>().ok());
+    Ok(detector != Some(fold::DETECTOR_VERSION) || get("fold_thresholds")?.as_deref() != Some(&*fingerprint(t)))
+}
+
+/// Inside `tx`: fold every pool again with `t` when the file is [`stale`],
+/// and stamp what it was folded with. Also keeps the local zone current.
+fn refold_if_stale(tx: &Transaction, t: &Thresholds) -> Result<(), String> {
+    let (zone, offset) = local_zone();
+    if meta_get(tx, "tz")?.as_deref() != Some(&*zone) || meta_get(tx, "tz_offset")?.as_deref() != Some(&*offset) {
+        meta_set(tx, "tz", &zone)?;
+        meta_set(tx, "tz_offset", &offset)?;
+    }
+    if !stale(tx, t)? {
+        return Ok(());
+    }
+    let pools: Vec<i64> = {
+        let mut st = tx.prepare("SELECT id FROM pool ORDER BY id").map_err(sql)?;
+        let rows = st.query_map([], |r| r.get(0)).map_err(sql)?;
+        rows.collect::<Result<_, _>>().map_err(sql)?
+    };
+    for pool in pools {
+        refold_pool(tx, pool, None, t)?;
+    }
+    meta_set(tx, "detector_version", &fold::DETECTOR_VERSION.to_string())?;
+    meta_set(tx, "fold_thresholds", &fingerprint(t))?;
+    meta_set(tx, "writer", env!("CARGO_PKG_VERSION"))?;
+    meta_set(
+        tx,
+        "clocks",
+        "sample.at, bank_sample.at, plan_sample.at, watch_state.at: this machine's wall clock at fetch; reset_at: the server's",
+    )
 }
 
 /// Apply every migration past the file's `user_version`, each in its own
@@ -1961,6 +2009,36 @@ mod tests {
             .cycles("codex", &obs(vec![]).account_key(), "secondary_window")
             .unwrap();
         assert_eq!(c[0].peak_pct, Some(30.0));
+    }
+
+    #[test]
+    fn a_new_detector_refolds_with_the_configured_thresholds() {
+        let p = temp("detector-config");
+        let a = 1_000_000.0;
+        // A fall to 3% while watching is a reset only with a near-zero of 5.
+        let t = Thresholds {
+            near_zero_pct: 5.0,
+            ..Thresholds::default()
+        };
+        {
+            let mut h = History::open(&p).unwrap();
+            for (at, pct) in [(a + H, 50.0), (a + H + 400.0, 3.0)] {
+                h.record(&[obs(vec![lane("secondary_window", pct, at, a + WEEK, WEEK)])], &t, at)
+                    .unwrap();
+            }
+            assert_eq!(h.count("reset_event"), 1);
+            h.conn
+                .execute("UPDATE meta SET v = '0' WHERE k = 'detector_version'", [])
+                .unwrap();
+        }
+        let mut r = super::super::Recorder::with_rollouts(p.clone(), Vec::new());
+        r.pass(&[], &t, a + 2.0 * H);
+        let h = History::open_with(&p, &t).unwrap();
+        assert_eq!(h.count("reset_event"), 1);
+        // The local zone is kept beside the times (§3.6).
+        assert!(h.meta("tz").unwrap().is_some());
+        assert!(h.meta("tz_offset").unwrap().is_some_and(|o| o.starts_with(['+', '-'])));
+        assert_eq!(h.meta("detector_version").unwrap().as_deref(), Some(&*fold::DETECTOR_VERSION.to_string()));
     }
 
     #[test]
