@@ -2903,8 +2903,9 @@ fn main() {
                 }
                 let mut found = vendors::read_all(&mut caches, &cfg, installed);
                 // The utilisation history is a by-product of the pass: what
-                // it read, written where it changed (OPS-304). Inside the
-                // catch, so a panic here is recorded like any other.
+                // it read, written where it changed (OPS-304). The recorder
+                // catches its own panics and says why on its status line, so
+                // one there never discards the readings this pass fetched.
                 let at = now();
                 found.history = recorder.pass(&vendors::observations(&found, at), &cfg.history, at);
                 found

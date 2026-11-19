@@ -28,7 +28,8 @@
 //! * Opens a cycle at the first sample, starting where the server's reset
 //!   instant and window put it (`reset_at - window_secs`).
 //! * Closes it on schedule (§5.4 rule 1) when a sample lands at or past its
-//!   `ends_at` (less [`tolerance`]); the new cycle's model is read off that
+//!   `ends_at` (less [`tolerance`], and never while it still states that
+//!   same end: [`rolled_over`]); the new cycle's model is read off that
 //!   boundary (§5.1): a start equal to the old end is `contiguous`, a later
 //!   one `use_anchored`.
 //! * Closes it on a plan change, a limit change and a window change
@@ -60,7 +61,7 @@
 /// Bumped whenever a change here, or in [`super::resets`], would fold the
 /// same samples differently. A file stamped with another version is folded
 /// again from its samples when it is opened.
-pub const DETECTOR_VERSION: i64 = 2;
+pub const DETECTOR_VERSION: i64 = 3;
 
 /// A figure at or above this is "exhausted" (§3.6 `exhausted_at`, §6.2).
 pub const EXHAUSTED_PCT: f64 = 99.5;
@@ -457,6 +458,9 @@ pub struct FoldInput<'a> {
     pub prev: Option<&'a Cycle>,
     /// The ordinal the first cycle produced takes.
     pub next_ordinal: u32,
+    /// The reading before `samples`, when it is known to be in an
+    /// established rolling stretch ([`rolling_mask`]).
+    pub rolling_seed: Option<&'a Sample>,
     pub thresholds: Thresholds,
 }
 
@@ -484,34 +488,78 @@ fn differs(a: Option<f64>, b: Option<f64>, by: f64) -> bool {
     matches!((a, b), (Some(a), Some(b)) if (a - b).abs() > by)
 }
 
-/// Whether a pool's reset instant slides with the clock (§5.1 rolling):
-/// three readings in a row, each a window ahead of its own fetch time, the
-/// instant moving later each time, spanning more than two tolerances. A
-/// fixed window's instant stands still while the clock catches it up.
-pub fn is_rolling(samples: &[Sample]) -> bool {
+/// Whether reading `n` has passed the end of a cycle that was due at `end`
+/// (§5.4 rule 1). A reading that states the same instant, within `tol`, is
+/// still in that cycle: the server says the reset has not happened, so it
+/// is no rollover until it is well past the end. One that states a later
+/// instant rolls once it is within `early` of the end - a reset instant
+/// read as "now plus seconds left" jitters by the request's latency. One
+/// that states no instant rolls only once the end has passed.
+pub fn rolled_over(end: f64, n: &Sample, tol: f64, early: f64) -> bool {
+    match n.reset_at {
+        Some(r) if (r - end).abs() <= tol => n.at >= end + tol,
+        Some(r) if r > end => n.at >= end - early,
+        _ => n.at >= end,
+    }
+}
+
+/// Which readings belong to a stretch where the pool's reset instant
+/// slides with the clock (§5.1 rolling): three readings in a row, each a
+/// window ahead of its own fetch time and in use (above `near` - an unused
+/// window states "now plus a window" too, and that is an unstarted window,
+/// not a rolling one), the instant moving later each time, spanning more
+/// than two tolerances. Once a stretch is established, readings that go on
+/// sliding belong to it even as the figure decays to zero. A fixed
+/// window's instant stands still while the clock catches it up.
+///
+/// Judged per stretch, never for the whole pool: a rolling stretch keeps no
+/// cycles, and the readings either side of it fold as they would without it.
+///
+/// `seed`, where given, is the reading just before `samples`, known to be
+/// in an established rolling stretch: the store folds a pool that has only
+/// ever been rolling on from its last reading rather than from its first.
+pub fn rolling_mask(samples: &[Sample], near: f64, seed: Option<&Sample>) -> Vec<bool> {
     let ahead = |s: &Sample| match (s.reset_at, s.window_secs) {
         (Some(r), Some(w)) if w > 0.0 => (r - s.at - w).abs() <= tolerance(Some(w)),
         _ => false,
     };
-    let mut run: Vec<&Sample> = Vec::new();
-    for s in samples {
-        let slid = run.last().is_some_and(|p| s.reset_at > p.reset_at);
-        if ahead(s) && (run.is_empty() || slid) {
-            run.push(s);
+    let used = |s: &Sample| s.pct.is_some_and(|p| p > near);
+    let mut mask = vec![false; samples.len()];
+    // The readings of the run so far, with their index (`None`: the seed).
+    let mut run: Vec<(Option<usize>, &Sample)> = seed.map(|s| (None, s)).into_iter().collect();
+    let mut established = seed.is_some();
+    for (i, s) in samples.iter().enumerate() {
+        let slid = run.last().is_some_and(|(_, p)| s.reset_at > p.reset_at);
+        if ahead(s) && slid && (used(s) || established) {
+            run.push((Some(i), s));
         } else {
             run.clear();
-            if ahead(s) {
-                run.push(s);
+            established = false;
+            if ahead(s) && used(s) {
+                run.push((Some(i), s));
             }
         }
-        if run.len() >= 3 {
-            let (first, last) = (run[0], run[run.len() - 1]);
+        if established {
+            mask[i] = true;
+        } else if run.len() >= 3 {
+            let (first, last) = (run[0].1, run[run.len() - 1].1);
             if last.at - first.at > 2.0 * tolerance(first.window_secs) {
-                return true;
+                established = true;
+                for k in run.iter().filter_map(|(k, _)| *k) {
+                    mask[k] = true;
+                }
             }
         }
     }
-    false
+    mask
+}
+
+/// Whether every dated reading of `samples` is in a rolling stretch (`mask`,
+/// from [`rolling_mask`]): the pool, as far as these readings show, keeps no
+/// cycles at all.
+pub fn is_rolling(samples: &[Sample], mask: &[bool]) -> bool {
+    samples.iter().any(|s| s.reset_at.is_some())
+        && samples.iter().zip(mask).all(|(s, m)| *m || s.reset_at.is_none())
 }
 
 /// The running state of the cycle being built.
@@ -644,16 +692,31 @@ pub fn fold(input: &FoldInput) -> FoldOutput {
         };
     }
     let dated = samples.iter().any(|s| s.reset_at.is_some());
-    if dated && is_rolling(samples) {
+    if !dated && input.prev.is_none_or(|p| p.model == CycleModel::Undated) {
+        return fold_undated(input);
+    }
+    let mask = rolling_mask(samples, input.thresholds.near_zero_pct, input.rolling_seed);
+    if !mask.contains(&true) {
+        return fold_dated(input);
+    }
+    if is_rolling(samples, &mask) {
         return FoldOutput {
             shape: PoolShape::Rolling,
             cycles: Vec::new(),
         };
     }
-    if !dated && input.prev.is_none_or(|p| p.model == CycleModel::Undated) {
-        return fold_undated(input);
-    }
-    fold_dated(input)
+    // A rolling stretch is left out; the readings either side fold as if
+    // it were a gap.
+    let fixed: Vec<Sample> = samples
+        .iter()
+        .zip(&mask)
+        .filter(|(_, m)| !**m)
+        .map(|(s, _)| s.clone())
+        .collect();
+    fold_dated(&FoldInput {
+        samples: &fixed,
+        ..input.clone()
+    })
 }
 
 fn fold_dated(input: &FoldInput) -> FoldOutput {
@@ -668,6 +731,37 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
 
     for s in input.samples {
         let Some(b) = cur.as_mut() else {
+            // Folding on from a kept cycle that closed for something other
+            // than its schedule: the sample after it is the one that closed
+            // it, and the next cycle starts where it closed, as a fold over
+            // everything opened it - never back at the server's start, which
+            // would overlap the kept cycle.
+            let seeded = input.prev.and_then(|p| {
+                let at = p.closed_at?;
+                let (source, seen) = match p.end_reason? {
+                    EndReason::PlanChanged | EndReason::LimitChanged => (StartSource::Inferred, false),
+                    EndReason::WindowChanged => (StartSource::Server, false),
+                    EndReason::Reset => (StartSource::Reset, true),
+                    EndReason::Scheduled | EndReason::PoolGone => return None,
+                };
+                Some((at, source, seen))
+            });
+            if let Some((start, source, seen)) = seeded {
+                let mut b = Building::new(Cycle::open(
+                    ordinal,
+                    start,
+                    s.reset_at,
+                    s.window_secs,
+                    CycleModel::Contiguous,
+                    source,
+                ));
+                ordinal += 1;
+                observed_model.push(seen);
+                b.observe(s, plans);
+                cur = Some(b);
+                prev_sample = Some(s);
+                continue;
+            }
             // The first cycle of this fold.
             let (start, mut source) = match (s.reset_at, s.window_secs) {
                 (Some(r), Some(w)) if w > 0.0 => (r - w, StartSource::Server),
@@ -747,7 +841,7 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
         }
 
         // Rule 1: the scheduled end. Holds whatever the percentage did.
-        let due = b.cycle.ends_at.is_some_and(|end| s.at >= end - tol);
+        let due = b.cycle.ends_at.is_some_and(|end| rolled_over(end, s, tol, tol));
         // Rules 2 and 3: a change of plan, limit or window between readings.
         let plan_changed = plan_change_between(plans, p.at, s.at).map(|c| c.at);
         let limit_changed = differs(p.limit, s.limit, 1e-9);
@@ -991,6 +1085,7 @@ mod tests {
             resets,
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         })
     }
@@ -1045,6 +1140,28 @@ mod tests {
                 assert_eq!(c.exhausted_at, None);
             }
         }
+    }
+
+    #[test]
+    fn a_reading_inside_the_tolerance_that_states_the_same_end_is_not_a_rollover() {
+        // Weekly tolerance is about 1.7 hours. The reading an hour before
+        // the end still states that end: it belongs to this week.
+        let a = 1_000_000.0;
+        let e = a + WEEK;
+        let samples = vec![
+            s(a + H, 10.0, Some(e), Some(WEEK)),
+            s(e - 2.0 * H, 50.0, Some(e), Some(WEEK)),
+            s(e - H, 95.0, Some(e), Some(WEEK)),
+            s(e + H, 1.0, Some(e + WEEK), Some(WEEK)),
+        ];
+        let out = run(&samples);
+        assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+        let c = &out.cycles[0];
+        assert_eq!(c.peak_pct, Some(95.0));
+        assert_eq!(c.closed_at, Some(e));
+        assert!(!c.end_is_lower_bound);
+        assert_eq!(out.cycles[1].starts_at, e);
+        assert_eq!(out.cycles[1].peak_pct, Some(1.0));
     }
 
     #[test]
@@ -1250,6 +1367,51 @@ mod tests {
         assert!(out.cycles.is_empty());
     }
 
+    /// Three real 5h windows read hourly, then the pool idle past its end,
+    /// read every five minutes: an unstarted window states "now plus five
+    /// hours" at 0% on every reading.
+    fn three_windows_then_idle(a: f64) -> Vec<Sample> {
+        let mut out = Vec::new();
+        for k in 0..3 {
+            let start = a + k as f64 * W5;
+            for h in 1..5 {
+                out.push(s(start + h as f64 * H, 10.0 * h as f64, Some(start + W5), Some(W5)));
+            }
+        }
+        let idle = a + 3.0 * W5 + 600.0;
+        for i in 0..4 {
+            let at = idle + i as f64 * 300.0;
+            out.push(s(at, 0.0, Some(at + W5), Some(W5)));
+        }
+        out
+    }
+
+    #[test]
+    fn an_idle_stretch_of_unstarted_windows_does_not_make_the_pool_rolling() {
+        let a = 1_000_000.0;
+        let out = run(&three_windows_then_idle(a));
+        assert_eq!(out.shape, PoolShape::Dated);
+        let closed: Vec<&Cycle> = out.cycles.iter().filter(|c| c.closed_at.is_some()).collect();
+        assert_eq!(closed.len(), 3, "{:#?}", out.cycles);
+        assert_eq!(closed[2].peak_pct, Some(40.0));
+    }
+
+    #[test]
+    fn a_rolling_stretch_keeps_the_cycles_either_side_of_it() {
+        let a = 1_000_000.0;
+        let w = 6.0 * H;
+        let mut samples = vec![s(a + H, 30.0, Some(a + w), Some(w)), s(a + 3.0 * H, 50.0, Some(a + w), Some(w))];
+        // Then, for a while, a window that slides with the clock in use.
+        for i in 0..4 {
+            let at = a + w + H + i as f64 * 0.5 * H;
+            samples.push(s(at, 20.0, Some(at + w), Some(w)));
+        }
+        let out = run(&samples);
+        assert_eq!(out.shape, PoolShape::Dated);
+        assert_eq!(out.cycles.len(), 1, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].peak_pct, Some(50.0));
+    }
+
     #[test]
     fn a_balance_keeps_no_cycles() {
         let a = 1_000_000.0;
@@ -1373,9 +1535,106 @@ mod tests {
             resets: &[],
             prev: Some(&kept),
             next_ordinal: 2,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[1..].to_vec());
+    }
+
+    /// Fold `samples` once, then again from each closed, observed cycle
+    /// the store could keep, and check the tail lands where the whole did.
+    fn incremental_matches_full(samples: &[Sample], plans: &[PlanChange]) {
+        let whole = run_with(samples, plans, &[], Role::Included);
+        for (j, kept) in whole.cycles.iter().enumerate() {
+            let (Some(_), Some(last)) = (kept.closed_at, kept.last_obs_at) else {
+                continue;
+            };
+            let rest: Vec<Sample> = samples.iter().filter(|x| x.at > last).cloned().collect();
+            let tail = fold(&FoldInput {
+                role: Role::Included,
+                samples: &rest,
+                plans,
+                resets: &[],
+                prev: Some(kept),
+                next_ordinal: kept.ordinal + 1,
+                rolling_seed: None,
+                thresholds: Thresholds::default(),
+            });
+            assert_eq!(
+                tail.cycles,
+                whole.cycles[j + 1..].to_vec(),
+                "kept cycle {}\nsamples {samples:#?}\nplans {plans:?}",
+                kept.ordinal
+            );
+        }
+    }
+
+    #[test]
+    fn folding_on_from_a_cycle_a_plan_change_closed_matches_folding_at_once() {
+        let a = 1_000_000.0;
+        let day = 24.0 * H;
+        let samples: Vec<Sample> = (1..=6)
+            .map(|d| s(a + d as f64 * day, 10.0 * d as f64, Some(a + WEEK), Some(WEEK)))
+            .collect();
+        let plans = vec![
+            PlanChange { at: a, plan: "pro".into() },
+            PlanChange {
+                at: a + 2.5 * day,
+                plan: "max".into(),
+            },
+        ];
+        let whole = run_with(&samples, &plans, &[], Role::Included);
+        assert_eq!(whole.cycles[1].starts_at, a + 2.5 * day);
+        assert_eq!(whole.cycles[1].start_source, StartSource::Inferred);
+        incremental_matches_full(&samples, &plans);
+    }
+
+    #[test]
+    fn folding_on_from_any_kept_cycle_matches_folding_at_once() {
+        // Randomised sequences of 5h windows: contiguous and use-anchored
+        // rollovers, gaps, plan and limit changes.
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut rnd = move |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        for _ in 0..300 {
+            let a = 1_000_000.0;
+            let mut samples = Vec::new();
+            let mut plans = vec![PlanChange { at: a - H, plan: "p0".into() }];
+            let mut start = a;
+            let mut at = a + 60.0;
+            let mut limit = 100.0;
+            for _ in 0..(3 + rnd(5)) {
+                let end = start + W5;
+                let mut pct = 0.0;
+                while at < end {
+                    pct += rnd(20) as f64;
+                    let mut x = s(at, pct.min(100.0), Some(end), Some(W5));
+                    x.limit = Some(limit);
+                    samples.push(x);
+                    at += (10 + rnd(110)) as f64 * 60.0;
+                    match rnd(30) {
+                        0 => plans.push(PlanChange {
+                            at: at - 30.0,
+                            plan: format!("p{}", plans.len()),
+                        }),
+                        1 => limit += 50.0,
+                        _ => {}
+                    }
+                }
+                // Contiguous, use-anchored after idle, or a whole window unseen.
+                start = match rnd(3) {
+                    0 => end,
+                    1 => at + (rnd(60) as f64) * 60.0,
+                    _ => end + W5,
+                };
+                at = at.max(start + 60.0);
+            }
+            incremental_matches_full(&samples, &plans);
+        }
     }
 
     #[test]
@@ -1402,6 +1661,7 @@ mod tests {
             resets: &[],
             prev: Some(&kept),
             next_ordinal: 3,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[2..].to_vec());

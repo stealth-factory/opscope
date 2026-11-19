@@ -754,7 +754,7 @@ pub fn rolling_lines(days: &[DayPeak]) -> Vec<String> {
     }
     let unread = days.len() - read.len();
     if unread > 0 {
-        clauses.push(format!("{} with no reading", plural(unread, "day", "days")));
+        clauses.push(format!("{} with no rolling reading", plural(unread, "day", "days")));
     }
     vec![clauses.join(" · ")]
 }
@@ -1287,6 +1287,6 @@ mod tests {
         let text = rows.join("\n");
         assert!(text.contains("rolling · daily peak since"), "{text}");
         assert!(text.contains("daily peak, last 30 days: highest 87% on"), "{text}");
-        assert!(text.contains("4 days with no reading"), "{text}");
+        assert!(squeezed(&rows).contains("4dayswithnorollingreading"), "{text}");
     }
 }

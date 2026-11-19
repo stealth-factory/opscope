@@ -32,7 +32,8 @@
 //! Then, in the order of §5.4:
 //!
 //! 1. **Scheduled end**: `N` at or past the cycle's end less [`tolerance`]
-//!    is a rollover, whatever the figure did. If the gap also holds a
+//!    is a rollover, whatever the figure did - unless `N` still states
+//!    that same end ([`fold::rolled_over`]). If the gap also holds a
 //!    discontinuity - a credit spent, or a new window that began before the
 //!    old one was due to end - a reset is recorded too, with effect
 //!    `unknown`: the two cannot be separated.
@@ -103,6 +104,9 @@ pub struct DetectInput<'a> {
     /// effect to record for an event with no instant to read one from
     /// (§5.5). Written to the event's evidence as `source: config`.
     pub effect_override: Option<&'a str>,
+    /// As [`fold::FoldInput::rolling_seed`]: the reading before `samples`,
+    /// known to be in a rolling stretch. Never compared with them.
+    pub rolling_seed: Option<&'a Sample>,
 }
 
 /// The effect `history_reset_effect` may name for a provider.
@@ -254,13 +258,16 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     if matches!(input.role, Role::Overage | Role::Balance) {
         return Vec::new();
     }
-    let all: Vec<&Sample> = input.before.into_iter().chain(input.samples.iter()).collect();
-    let dated = all.iter().any(|s| s.reset_at.is_some());
-    // Rule 4, decided exactly as the fold decides it.
-    if dated && fold::is_rolling(input.samples) {
-        return Vec::new();
-    }
     let t = &input.thresholds;
+    // Rule 4, decided exactly as the fold decides it: the readings of a
+    // rolling stretch are no evidence of anything, and are left out.
+    let mask = fold::rolling_mask(input.samples, t.near_zero_pct, input.rolling_seed);
+    let all: Vec<&Sample> = input
+        .before
+        .into_iter()
+        .chain(input.samples.iter().zip(&mask).filter(|(_, m)| !**m).map(|(s, _)| s))
+        .collect();
+    let dated = all.iter().any(|s| s.reset_at.is_some());
     let near = t.near_zero_pct;
 
     let mut pairs: Vec<Pair> = Vec::new();
@@ -290,7 +297,7 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
                     n,
                     watching,
                     tol,
-                    due_end: end.filter(|e| n.at >= e - tol),
+                    due_end: end.filter(|e| fold::rolled_over(*e, n, tol, tol)),
                     plan_changed: fold::plan_change_between(input.plans, p.at, n.at).is_some(),
                     limit_changed: differs(p.limit, n.limit, 1e-9),
                     window_changed: differs(p.window_secs, n.window_secs, 1.0),
@@ -703,6 +710,7 @@ mod tests {
             thresholds: Thresholds::default(),
             role: Role::Included,
             effect_override: None,
+            rolling_seed: None,
         }
     }
 
@@ -728,8 +736,24 @@ mod tests {
             resets,
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         })
+    }
+
+    #[test]
+    fn a_reading_inside_the_tolerance_that_states_the_same_end_is_not_a_rollover() {
+        let e = A + WEEK;
+        let samples = vec![wk(A + H, 10.0), wk(e - 2.0 * H, 50.0), wk(e - H, 95.0), {
+            s(e + H, 1.0, Some(e + WEEK), Some(WEEK))
+        }];
+        let i = input(&samples, &[], &[]);
+        assert_eq!(
+            verdicts(&i),
+            vec![Verdict::Steady, Verdict::Steady, Verdict::Rollover],
+            "{:#?}",
+            judge(&i)
+        );
     }
 
     #[test]
@@ -1131,6 +1155,7 @@ mod tests {
             resets: &[e],
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(out.cycles.len(), 2);

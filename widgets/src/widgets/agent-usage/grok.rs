@@ -1228,7 +1228,11 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale,
             projected,
             apart: false,
-            pool_key: if d.spacexsi.unified() { crate::shared::SPACEXSI_POOL_KEY } else { "credits" }.into(),
+            // One key whether or not the plan is linked, so the vendor's
+            // history is one pool across a link; the SpaceXSI copy is
+            // renamed to the shared weekly pool where it is written
+            // (`Observation::for_spacexsi`).
+            pool_key: "credits".into(),
             fetched_at: q.taken.unwrap_or(0.0),
             ..Lane::default()
         });
@@ -2899,6 +2903,19 @@ mod tests {
         let own = grok_tab(&unified_grok(Spacexsi::No), 120, &palette())
             .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
         assert!(own.contains("WEEKLY QUOTA") && !own.contains("SpaceXSI"), "{own}");
+    }
+
+    #[test]
+    fn the_credits_pool_keeps_one_key_whether_or_not_the_plan_is_linked() {
+        // Its history is one pool across a link or an unlink; the SpaceXSI
+        // copy is the store's to name (`Observation::for_spacexsi`).
+        let key = |place: Spacexsi| {
+            let mut d = unified_grok(place);
+            d.spacexsi = place;
+            lanes(&d).first().map(|l| l.pool_key.clone())
+        };
+        assert_eq!(key(Spacexsi::Shared).as_deref(), Some("credits"));
+        assert_eq!(key(Spacexsi::No).as_deref(), Some("credits"));
     }
 
     #[test]

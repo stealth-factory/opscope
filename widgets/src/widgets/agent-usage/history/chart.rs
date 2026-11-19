@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use rusqlite::params;
 
 use super::Observation;
-use super::fold::{Cycle, CycleEffect, Role, Sample, is_rolling};
+use super::fold::{Cycle, CycleEffect, Role, Sample, Thresholds, rolling_mask};
 use super::overage::read::MonthTotal;
 use super::store::History;
 
@@ -246,7 +246,10 @@ impl History {
     }
 
     /// One pool's chart, or `None` when it has nothing to draw yet.
-    fn pool_history(&self, provider: &str, account_key: &str, row: &PoolRow) -> Result<Option<PoolHistory>, String> {
+    /// One pool's charts: none when it has nothing to draw yet, and two for
+    /// an allowance that has both cycles and rolling stretches between them
+    /// - the bars, then the stretches' daily-peak line.
+    fn pool_history(&self, provider: &str, account_key: &str, row: &PoolRow, t: &Thresholds) -> Result<Vec<PoolHistory>, String> {
         let role = Role::from_name(&row.role);
         let mut out = PoolHistory {
             label: row.label.clone(),
@@ -262,16 +265,16 @@ impl History {
             Role::Balance => {
                 let months = self.balance_months(provider, account_key, &row.key)?;
                 if months.is_empty() {
-                    return Ok(None);
+                    return Ok(Vec::new());
                 }
                 out.total = months.len();
                 out.body = Body::Balance(months);
-                return Ok(Some(out));
+                return Ok(vec![out]);
             }
             Role::Overage => {
                 let cycles = self.overage_cycles(provider, account_key, &row.key)?;
                 if cycles.is_empty() {
-                    return Ok(None);
+                    return Ok(Vec::new());
                 }
                 out.total = cycles.len();
                 out.since = cycles.first().map(|c| c.cycle.starts_at);
@@ -290,22 +293,29 @@ impl History {
                     .overage_roll_day(provider, account_key, &row.key)?
                     .map(|d| (d.day, d.seen));
                 out.body = Body::Overage { bars, roll_day };
-                return Ok(Some(out));
+                return Ok(vec![out]);
             }
             Role::Included => {}
         }
+        // A rolling stretch keeps no cycles (§5.1); it sits between them, so
+        // a pool can have both. Its readings are drawn as a daily-peak line.
+        let samples = self.samples(provider, account_key, &row.key)?;
+        let mask = rolling_mask(&samples, t.near_zero_pct, None);
+        let rolling: Vec<Sample> = samples.iter().zip(&mask).filter(|(_, m)| **m).map(|(s, _)| s.clone()).collect();
+        let rolling_chart = |out: &PoolHistory| -> Option<PoolHistory> {
+            let first = rolling.first()?;
+            let days = daily_peaks(&rolling, local_midnight);
+            let from = days.len().saturating_sub(MOST_DAYS);
+            Some(PoolHistory {
+                since: Some(first.at),
+                total: days.len(),
+                body: Body::Rolling(days[from..].to_vec()),
+                ..out.clone()
+            })
+        };
         let cycles = self.cycles(provider, account_key, &row.key)?;
         if cycles.is_empty() {
-            let samples = self.samples(provider, account_key, &row.key)?;
-            if samples.is_empty() || !is_rolling(&samples) {
-                return Ok(None);
-            }
-            let days = daily_peaks(&samples, local_midnight);
-            out.since = samples.first().map(|s| s.at);
-            out.total = days.len();
-            let from = days.len().saturating_sub(MOST_DAYS);
-            out.body = Body::Rolling(days[from..].to_vec());
-            return Ok(Some(out));
+            return Ok(rolling_chart(&out).into_iter().collect());
         }
         out.total = cycles.len();
         out.since = cycles.first().map(|c| c.starts_at);
@@ -344,7 +354,8 @@ impl History {
             }
         }
         out.body = Body::Cycles(bars);
-        Ok(Some(out))
+        let line = rolling_chart(&out);
+        Ok(std::iter::once(out).chain(line).collect())
     }
 }
 
@@ -404,13 +415,16 @@ pub fn daily_peaks(samples: &[Sample], midnight: impl Fn(f64) -> f64) -> Vec<Day
 
 /// Every tab's history, read once a pass. A tab's pools are those of the
 /// account it draws - the unified plan's own for a SpaceXSI tab.
-pub fn gather(h: &History, obs: &[Observation]) -> Result<HashMap<String, TabHistory>, String> {
+pub fn gather(h: &History, obs: &[Observation], t: &Thresholds) -> Result<HashMap<String, TabHistory>, String> {
     let mut out: HashMap<String, TabHistory> = HashMap::new();
     let mut done: Vec<(String, String, String)> = Vec::new();
     for o in obs {
-        let (provider, key) = match &o.spacexsi_account {
-            Some(k) => ("spacexsi".to_string(), k.clone()),
-            None => (o.provider.clone(), o.account_key()),
+        // The keys the recorder wrote under: an outage reading with no id
+        // maps to the account last seen, and a unified plan's copy to its own.
+        let own = h.account_key_of(o);
+        let (provider, key) = match h.spacexsi_key_of(o) {
+            Some(k) => ("spacexsi".to_string(), k),
+            None => (o.provider.clone(), own.clone()),
         };
         let marker = (o.tab.clone(), provider.clone(), key.clone());
         if done.contains(&marker) {
@@ -435,11 +449,9 @@ pub fn gather(h: &History, obs: &[Observation]) -> Result<HashMap<String, TabHis
         }
         let tab = out.entry(o.tab.clone()).or_default();
         for r in ordered {
-            if let Some(ph) = h.pool_history(&provider, &key, r)? {
-                tab.pools.push(ph);
-            }
+            tab.pools.extend(h.pool_history(&provider, &key, r, t)?);
         }
-        tab.expired.extend(h.expired_banks(&o.provider, &o.account_key())?);
+        tab.expired.extend(h.expired_banks(&o.provider, &own)?);
     }
     Ok(out)
 }
@@ -502,7 +514,13 @@ mod tests {
         }
         // This pass reports only the weekly pool, after a reading of it.
         let pass = [obs(vec![lane("secondary_window", 40.0, a + 2.0 * WEEK + 3.0 * 86_400.0, a + 3.0 * WEEK, WEEK)])];
-        let got = gather(&h, &pass).unwrap();
+        // A 5h window whose reset slides with the clock: a rolling stretch,
+        // drawn as a line rather than dropped.
+        for k in 0..4 {
+            let at = a + 3.0 * WEEK + k as f64 * 3600.0;
+            h.record(&[obs(vec![lane("primary_window", 20.0 + k as f64, at, at + FIVE, FIVE)])], &t, at).unwrap();
+        }
+        let got = gather(&h, &pass, &t).unwrap();
         let tab = &got["codex"];
         let labels: Vec<&str> = tab.pools.iter().map(|p| p.label.as_str()).collect();
         assert_eq!(labels, vec!["secondary_window", "primary_window"]);
@@ -510,6 +528,11 @@ mod tests {
         assert_eq!(bars.len(), 3);
         assert_eq!(tab.pools[0].total, 3);
         assert_eq!(tab.pools[0].since, Some(bars[0].cycle.starts_at));
+        assert!(
+            tab.pools.iter().any(|p| p.label == "primary_window" && matches!(p.body, Body::Rolling(_))),
+            "{:?}",
+            tab.pools.iter().map(|p| (&p.label, &p.body)).collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

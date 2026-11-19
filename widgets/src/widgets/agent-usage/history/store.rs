@@ -44,7 +44,7 @@ use super::fold::{
     self, Cycle, CycleModel, EndReason, FoldInput, PlanChange, Role, Sample, Source, StartSource, Thresholds,
 };
 use super::{BankReading, Observation, WatchReading, backfill, overage, resets};
-use crate::shared::Lane;
+use crate::shared::{Lane, Spacexsi};
 
 /// The file's name under `tc::state_dir()`.
 pub const FILE: &str = "agent-usage-history.sqlite";
@@ -243,6 +243,9 @@ fn damaged(e: &rusqlite::Error) -> bool {
 struct Failure {
     error: OpenError,
     damaged: bool,
+    /// The device and inode of the file that failed, so it is that file,
+    /// and no other, that is set aside.
+    identity: Option<(u64, u64)>,
 }
 
 impl Failure {
@@ -250,6 +253,7 @@ impl Failure {
         Failure {
             damaged: damaged(&e),
             error: OpenError::Failed(e.to_string()),
+            identity: None,
         }
     }
 
@@ -257,6 +261,7 @@ impl Failure {
         Failure {
             error: OpenError::Failed(why),
             damaged: false,
+            identity: None,
         }
     }
 }
@@ -270,36 +275,111 @@ pub struct History {
     pub notice: Option<String>,
 }
 
-/// The file renamed out of the way: `<name>.damaged-<epoch>`, and its WAL
-/// and shared-memory files beside it under the same stem, so none of them
-/// is replayed into the new file.
-fn set_aside(path: &Path, at: i64) -> Result<PathBuf, String> {
-    let aside = PathBuf::from(format!("{}.damaged-{at}", path.display()));
-    std::fs::rename(path, &aside).map_err(|e| format!("cannot set the damaged file aside: {e}"))?;
+/// The device and inode of the file at `path`, or `None` when there is none.
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+}
+
+/// Move `from` to `to` without ever replacing what `to` holds: a hard link
+/// that fails when `to` exists, then the old name removed. Where links are
+/// not supported, a rename to a name checked free under the lock.
+fn move_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::hard_link(from, to) {
+        Ok(()) => std::fs::remove_file(from),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) if !to.exists() => std::fs::rename(from, to),
+        Err(e) => Err(e),
+    }
+}
+
+/// The damaged file moved out of the way: `<name>.damaged-<epoch>-<pid>-<n>`,
+/// with its WAL and shared-memory files beside it under the same stem, so
+/// none of them is replayed into the new file. Never overwrites an earlier
+/// set-aside.
+///
+/// Two panes can find the same file damaged at once, so it is done under an
+/// exclusive lock on `<name>.lock`, and only while the file at `path` is still
+/// the one that failed (`failed`, its device and inode when it was opened):
+/// otherwise another pane has already set it aside and started a new file,
+/// and `None` says to open that one instead of moving it.
+fn set_aside(path: &Path, at: i64, failed: Option<(u64, u64)>) -> Result<Option<PathBuf>, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
+    let lock = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock_path)
+        .map_err(|e| format!("cannot lock the damaged file: {e}"))?;
+    lock.lock().map_err(|e| format!("cannot lock the damaged file: {e}"))?;
+    let now = identity(path);
+    if now.is_none() || (failed.is_some() && now != failed) {
+        return Ok(None);
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let mut n = 0u32;
+    let aside = loop {
+        let name = PathBuf::from(format!(
+            "{}.damaged-{at}-{}-{nanos}{}",
+            path.display(),
+            std::process::id(),
+            if n == 0 { String::new() } else { format!("-{n}") }
+        ));
+        match move_new(path, &name) {
+            Ok(()) => break name,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && n < 100 => n += 1,
+            Err(e) => return Err(format!("cannot set the damaged file aside: {e}")),
+        }
+    };
     for side in ["-wal", "-shm"] {
         let from = PathBuf::from(format!("{}{side}", path.display()));
         if from.exists() {
-            let _ = std::fs::rename(&from, PathBuf::from(format!("{}{side}", aside.display())));
+            // A side file that cannot follow is removed rather than left to
+            // be replayed into the new file; the main file is already kept.
+            let to = PathBuf::from(format!("{}{side}", aside.display()));
+            if move_new(&from, &to).is_err() {
+                let _ = std::fs::remove_file(&from);
+            }
         }
     }
-    Ok(aside)
+    Ok(Some(aside))
 }
 
 impl History {
-    /// Open the history, making and migrating it as needed. A damaged file
-    /// is renamed and a new one started; a newer one is left alone.
+    /// Open the history with the default thresholds: see [`History::open_with`].
     pub fn open(path: &Path) -> Result<History, OpenError> {
+        History::open_with(path, &Thresholds::default())
+    }
+
+    /// Open the history, making and migrating it as needed. A damaged file
+    /// is renamed and a new one started; a newer one is left alone. A file
+    /// folded by another detector, or with other thresholds than `t`, is
+    /// folded again with `t` - the configured ones, never the defaults.
+    pub fn open_with(path: &Path, t: &Thresholds) -> Result<History, OpenError> {
         let mut tries = 0;
         loop {
-            match History::open_once(path) {
+            match History::open_once(path, t) {
                 Ok(h) => return Ok(h),
                 Err(f) if f.damaged => {
                     let first = match &f.error {
                         OpenError::Failed(why) => why.clone(),
                         OpenError::Newer(v) => format!("version {v}"),
                     };
-                    let aside = set_aside(path, opscope_core::now() as i64).map_err(OpenError::Failed)?;
-                    let mut h = History::open_once(path).map_err(|f| f.error)?;
+                    let Some(aside) =
+                        set_aside(path, opscope_core::now() as i64, f.identity).map_err(OpenError::Failed)?
+                    else {
+                        // Another pane set it aside first: open what it made.
+                        tries += 1;
+                        if tries >= OPEN_TRIES {
+                            return Err(f.error);
+                        }
+                        continue;
+                    };
+                    let mut h = History::open_once(path, t).map_err(|f| f.error)?;
                     let name = aside
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
@@ -321,7 +401,7 @@ impl History {
         }
     }
 
-    fn open_once(path: &Path) -> Result<History, Failure> {
+    fn open_once(path: &Path, t: &Thresholds) -> Result<History, Failure> {
         use std::os::unix::fs::OpenOptionsExt;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Failure::other(format!("cannot make {}: {e}", dir.display())))?;
@@ -338,6 +418,16 @@ impl History {
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => true,
             Err(e) => return Err(Failure::other(format!("cannot create it: {e}"))),
         };
+        // The file as it is now, before SQLite opens it: what a damaged
+        // verdict below is about.
+        let id = identity(path);
+        History::open_conn(path, existed, t).map_err(|mut f| {
+            f.identity = id;
+            f
+        })
+    }
+
+    fn open_conn(path: &Path, existed: bool, t: &Thresholds) -> Result<History, Failure> {
         let conn = Connection::open(path).map_err(Failure::from_sql)?;
         conn.busy_timeout(BUSY).map_err(Failure::from_sql)?;
         // The version first: a newer file is left exactly as it is, which
@@ -349,6 +439,7 @@ impl History {
             return Err(Failure {
                 error: OpenError::Newer(version),
                 damaged: false,
+                identity: None,
             });
         }
         // A file copied in, or left by an older build, keeps whatever mode
@@ -365,6 +456,7 @@ impl History {
             return Err(Failure {
                 error: OpenError::Failed(format!("quick_check said {ok}")),
                 damaged: true,
+                identity: None,
             });
         }
         let _: String = conn
@@ -378,27 +470,14 @@ impl History {
             path: path.to_path_buf(),
             notice: None,
         };
-        h.refold_if_detector_changed(&Thresholds::default())
-            .map_err(Failure::other)?;
+        h.refold_if_detector_changed(t).map_err(Failure::other)?;
         Ok(h)
     }
 
-    /// Fold every pool again when the file was folded by another detector.
+    /// Fold every pool again when the file was folded by another detector
+    /// or with other thresholds, in a transaction of its own.
     fn refold_if_detector_changed(&mut self, t: &Thresholds) -> Result<(), String> {
-        // Read as text, as `meta_set` writes it; anything unreadable is
-        // simply not this detector.
-        let stamped = |c: &Connection| -> Result<Option<i64>, String> {
-            let v: Option<String> = c
-                .query_row(
-                    "SELECT CAST(v AS TEXT) FROM meta WHERE k = 'detector_version'",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(sql)?;
-            Ok(v.and_then(|v| v.parse().ok()))
-        };
-        if stamped(&self.conn)? == Some(fold::DETECTOR_VERSION) {
+        if !stale(&self.conn, t)? {
             return Ok(());
         }
         let tx = self
@@ -406,24 +485,20 @@ impl History {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
         // Another pane may have done it while this one waited.
-        if stamped(&tx)? != Some(fold::DETECTOR_VERSION) {
-            let pools: Vec<i64> = {
-                let mut st = tx.prepare("SELECT id FROM pool ORDER BY id").map_err(sql)?;
-                let rows = st.query_map([], |r| r.get(0)).map_err(sql)?;
-                rows.collect::<Result<_, _>>().map_err(sql)?
-            };
-            for pool in pools {
-                refold_pool(&tx, pool, None, t)?;
-            }
-            meta_set(&tx, "detector_version", &fold::DETECTOR_VERSION.to_string())?;
-            meta_set(&tx, "writer", env!("CARGO_PKG_VERSION"))?;
-            meta_set(
-                &tx,
-                "clocks",
-                "sample.at, bank_sample.at, plan_sample.at, watch_state.at: this machine's wall clock at fetch; reset_at: the server's",
-            )?;
-        }
+        refold_if_stale(&tx, t)?;
         tx.commit().map_err(sql)
+    }
+
+    /// The key the unified plan's copy of `o` is kept under. See
+    /// [`spacexsi_key`].
+    pub fn spacexsi_key_of(&self, o: &Observation) -> Option<String> {
+        let own = self.account_key_of(o);
+        spacexsi_key(&self.conn, o, &own).ok().flatten()
+    }
+
+    /// The key `o` is stored under. See [`key_of`].
+    pub fn account_key_of(&self, o: &Observation) -> String {
+        key_of(&self.conn, o).unwrap_or_else(|_| o.account_key())
     }
 
     /// The first sample of any pool of one account, or `None` when it has
@@ -447,24 +522,47 @@ impl History {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
+        // Thresholds changed in the config since the file was folded.
+        refold_if_stale(&tx, t)?;
         let mut refold: Vec<(i64, f64)> = Vec::new();
         let mut account_refold: Vec<(i64, f64)> = Vec::new();
         let mut banks_changed: Vec<i64> = Vec::new();
         for o in obs {
-            let key = o.account_key();
+            let key = key_of(&tx, o)?;
+            if o.has_stable_id() && meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
+                meta_set(&tx, &last_account(o), &key)?;
+            }
             let account = upsert_account(&tx, &o.provider, &key, &o.heading, now)?;
+            // Where a shared plan was keyed this pass, remember it for a
+            // pass that cannot key it (`spacexsi_key`).
+            if let (Some(Spacexsi::Shared), Some(sk)) = (o.spacexsi, &o.spacexsi_account) {
+                if meta_get(&tx, &partner(o, &key))?.as_deref() != Some(sk.as_str()) {
+                    meta_set(&tx, &partner(o, &key), sk)?;
+                }
+            }
+            let spacexsi_account = spacexsi_key(&tx, o, &key)?;
             let sx = o.spacexsi.map(super::spacexsi_name);
             write_lanes(&tx, account, &o.lanes, sx, &mut refold)?;
             // On the unified plan the lanes are kept twice (§3.4): under the
             // vendor, and under SpaceXSI, where its cycles are derived.
-            if let Some(sk) = &o.spacexsi_account {
+            let copy = spacexsi_account.as_ref().map(|_| o.for_spacexsi());
+            if let (Some(sk), Some(u)) = (&spacexsi_account, &copy) {
                 let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
-                write_lanes(&tx, unified, &o.lanes, sx, &mut refold)?;
+                write_lanes(&tx, unified, &u.lanes, sx, &mut refold)?;
             }
             if let Some(b) = &o.bank {
+                // A bank event runs from the reading before this one, and
+                // can be attributed to any pair of samples it overlaps.
+                let opened: Option<f64> = tx
+                    .query_row(
+                        "SELECT MAX(at) FROM bank_sample WHERE account_id = ?1 AND at < ?2",
+                        params![account, b.at],
+                        |r| r.get(0),
+                    )
+                    .map_err(sql)?;
                 if write_bank(&tx, account, b)? {
                     banks_changed.push(account);
-                    account_refold.push((account, b.at));
+                    account_refold.push((account, opened.unwrap_or(b.at)));
                 }
             }
             if let Some(p) = &o.plan {
@@ -479,12 +577,10 @@ impl History {
             // and per-request charges - under the vendor and, on the unified
             // plan, under SpaceXSI as its lanes are. A link that is new folds
             // the overage pool's spans again from the start.
-            let mut owners = vec![account];
-            if let Some(sk) = &o.spacexsi_account {
-                owners.push(upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?);
-            }
-            for &owner in &owners {
-                overage::write_links_and_charges(&tx, owner, o, &mut refold)?;
+            overage::write_links_and_charges(&tx, account, o, &mut refold)?;
+            if let (Some(sk), Some(u)) = (&spacexsi_account, &copy) {
+                let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
+                overage::write_links_and_charges(&tx, unified, u, &mut refold)?;
             }
             // The Codex backfill is not written here: its rollouts can run to
             // gigabytes, so they are read off this transaction and written
@@ -557,6 +653,7 @@ impl History {
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(sql)?;
+        refold_if_stale(&tx, t)?;
         let account = upsert_account(&tx, provider, account_key, heading, now)?;
         let mut refold: Vec<(i64, f64)> = Vec::new();
         for r in rows {
@@ -640,6 +737,118 @@ impl History {
     }
 }
 
+/// The `meta` key holding the account key a provider's profile was last
+/// seen under with a stable id.
+fn last_account(o: &Observation) -> String {
+    let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
+    format!("last_account:{}:{profile}", o.provider)
+}
+
+/// The key `o` is stored under: its own stable id where it has one. Where it
+/// has none - a provider whose id comes in the live body, during an outage -
+/// the account this provider's profile was last seen under, so the outage's
+/// watch state lands on that account rather than on a `profile:` account
+/// nobody has. Never invented: a provider never seen with an id keeps the
+/// profile key it always had.
+fn key_of(c: &Connection, o: &Observation) -> Result<String, String> {
+    if o.has_stable_id() {
+        return Ok(o.account_key());
+    }
+    let last: Option<String> = c
+        .query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [last_account(o)], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(sql)?;
+    Ok(last.unwrap_or_else(|| o.account_key()))
+}
+
+/// The `meta` key holding the unified plan's key a vendor account shared
+/// it under, the last time both vendors were read.
+fn partner(o: &Observation, own: &str) -> String {
+    format!("spacexsi_partner:{}:{own}", o.provider)
+}
+
+/// The key the unified plan's copy of `o` is written under: the one the
+/// pass named, or for a shared account read without its partner this pass,
+/// the one the two last shared. `None` when there is none to be had: the
+/// copy is then not written, rather than started under a key of its own.
+fn spacexsi_key(c: &Connection, o: &Observation, own: &str) -> Result<Option<String>, String> {
+    if o.spacexsi_account.is_some() || o.spacexsi != Some(Spacexsi::Shared) {
+        return Ok(o.spacexsi_account.clone());
+    }
+    c.query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [partner(o, own)], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(sql)
+}
+
+/// What the derived tables were folded with: the thresholds, as text.
+fn fingerprint(t: &Thresholds) -> String {
+    format!("{t:?}")
+}
+
+/// The local zone's name, where this machine says one, and its offset now
+/// (§3.6 `meta`): the history's times are epoch seconds, and a report that
+/// groups them by day needs to know whose days.
+fn local_zone() -> (String, String) {
+    let name = std::env::var("TZ")
+        .ok()
+        .map(|z| z.trim_start_matches(':').to_string())
+        .filter(|z| !z.is_empty())
+        .or_else(|| {
+            std::fs::read_link("/etc/localtime").ok().and_then(|p| {
+                let p = p.to_string_lossy().into_owned();
+                p.split_once("zoneinfo/").map(|(_, z)| z.to_string())
+            })
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let offset = chrono::Local::now().format("%:z").to_string();
+    (name, offset)
+}
+
+/// Whether the file was folded by another detector or other thresholds.
+fn stale(c: &Connection, t: &Thresholds) -> Result<bool, String> {
+    // Read as text, as `meta_set` writes it; anything unreadable is simply
+    // not this detector.
+    let get = |k: &str| -> Result<Option<String>, String> {
+        c.query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [k], |r| r.get(0))
+            .optional()
+            .map(Option::flatten)
+            .map_err(sql)
+    };
+    let detector = get("detector_version")?.and_then(|v| v.parse::<i64>().ok());
+    Ok(detector != Some(fold::DETECTOR_VERSION) || get("fold_thresholds")?.as_deref() != Some(&*fingerprint(t)))
+}
+
+/// Inside `tx`: fold every pool again with `t` when the file is [`stale`],
+/// and stamp what it was folded with. Also keeps the local zone current.
+fn refold_if_stale(tx: &Transaction, t: &Thresholds) -> Result<(), String> {
+    let (zone, offset) = local_zone();
+    if meta_get(tx, "tz")?.as_deref() != Some(&*zone) || meta_get(tx, "tz_offset")?.as_deref() != Some(&*offset) {
+        meta_set(tx, "tz", &zone)?;
+        meta_set(tx, "tz_offset", &offset)?;
+    }
+    if !stale(tx, t)? {
+        return Ok(());
+    }
+    let pools: Vec<i64> = {
+        let mut st = tx.prepare("SELECT id FROM pool ORDER BY id").map_err(sql)?;
+        let rows = st.query_map([], |r| r.get(0)).map_err(sql)?;
+        rows.collect::<Result<_, _>>().map_err(sql)?
+    };
+    for pool in pools {
+        refold_pool(tx, pool, None, t)?;
+    }
+    meta_set(tx, "detector_version", &fold::DETECTOR_VERSION.to_string())?;
+    meta_set(tx, "fold_thresholds", &fingerprint(t))?;
+    meta_set(tx, "writer", env!("CARGO_PKG_VERSION"))?;
+    meta_set(
+        tx,
+        "clocks",
+        "sample.at, bank_sample.at, plan_sample.at, watch_state.at: this machine's wall clock at fetch; reset_at: the server's",
+    )
+}
+
 /// Apply every migration past the file's `user_version`, each in its own
 /// `BEGIN IMMEDIATE`, reading the version again inside it so a pane that
 /// lost the race does nothing.
@@ -652,6 +861,7 @@ fn migrate(conn: &Connection) -> Result<(), Failure> {
             return Err(Failure {
                 error: OpenError::Newer(v),
                 damaged: false,
+                identity: None,
             });
         }
         if v == SCHEMA_VERSION {
@@ -761,6 +971,13 @@ fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many samples [`load_samples`] has read on this thread, so a test
+    /// can bound what one write costs.
+    static SAMPLES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A pool's samples after `after` (all of them for `None`), oldest first.
 fn load_samples(conn: &Connection, pool: i64, after: Option<f64>) -> Result<Vec<Sample>, String> {
     let mut st = conn
@@ -771,7 +988,10 @@ fn load_samples(conn: &Connection, pool: i64, after: Option<f64>) -> Result<Vec<
     let rows = st
         .query_map(params![pool, after.unwrap_or(f64::NEG_INFINITY)], sample_row)
         .map_err(sql)?;
-    rows.collect::<Result<_, _>>().map_err(sql)
+    let out: Vec<Sample> = rows.collect::<Result<_, _>>().map_err(sql)?;
+    #[cfg(test)]
+    SAMPLES_READ.with(|n| n.set(n.get() + out.len()));
+    Ok(out)
 }
 
 /// Write one lane per pool, under the five-minute and change-or-heartbeat
@@ -1101,11 +1321,19 @@ fn insert_cycle(tx: &Transaction, pool: i64, c: &Cycle) -> Result<i64, String> {
 /// Fold one pool again from the cycle before `from` (from the start for
 /// `None`), replacing every derived row after the cycles it keeps (§3.5).
 ///
-/// Kept: the closed, observed cycles whose last observation is before
-/// `from`, less the last of them - the cycle before the point is folded
-/// again, since a sample just before a boundary can move it - and the
-/// hollow cycles between them. Everything after is deleted and rebuilt from
-/// the samples after the last kept observation.
+/// Kept: the closed, observed cycles whose last observation is before the
+/// second-last sample before `from` - so the sample that closed each of
+/// them is already behind the point, and a sample just before a boundary,
+/// which can move it, is folded again - and the hollow cycles between them.
+/// Everything after is deleted and rebuilt from the samples after the last
+/// kept observation.
+///
+/// Bounded, so a write does not re-read a pool's whole history: a balance
+/// has no cycle, and folds on from the sample before `from`; a pool that has
+/// only ever been rolling has no cycle either, and folds on from its last
+/// reading as a seed of its rolling stretch; and an overage or balance
+/// pool's linked included pools are read only over the stretch re-folded.
+/// What is still read whole is a pool's only cycle while it is open.
 fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -> Result<(), String> {
     let (account, role, provider): (i64, String, String) = tx
         .query_row(
@@ -1115,21 +1343,46 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         )
         .map_err(sql)?;
     let role = Role::from_name(&role);
-    // The second-latest closed, observed cycle seen before `from`: one
-    // query, so a pool with years of five-hour cycles does not load them
-    // all on every write.
-    let kept: Option<i64> = match from {
+    // The last sample before `from`: what the point is folded on from.
+    let s_prev: Option<f64> = match from {
         None => None,
         Some(from) => tx
             .query_row(
-                "SELECT ordinal FROM cycle
-                  WHERE pool_id = ?1 AND closed_at IS NOT NULL AND last_obs_at IS NOT NULL AND last_obs_at < ?2
-                  ORDER BY ordinal DESC LIMIT 1 OFFSET 1",
+                "SELECT MAX(at) FROM sample WHERE pool_id = ?1 AND at < ?2",
+                params![pool, from],
+                |r| r.get(0),
+            )
+            .map_err(sql)?,
+    };
+    // The latest closed, observed cycle whose last observation is before
+    // the second-last sample before `from`: one query, so a pool with years
+    // of five-hour cycles does not load them all on every write. Two
+    // samples, not one: the sample that closed it is behind the point, and
+    // a new reading can make the two before it the end of a rolling stretch
+    // (`fold::rolling_mask`), which a kept cycle must not have observed.
+    let s_prev2: Option<f64> = match from {
+        None => None,
+        Some(from) => tx
+            .query_row(
+                "SELECT at FROM sample WHERE pool_id = ?1 AND at < ?2 ORDER BY at DESC LIMIT 1 OFFSET 1",
                 params![pool, from],
                 |r| r.get(0),
             )
             .optional()
             .map_err(sql)?,
+    };
+    let kept: Option<i64> = match s_prev2 {
+        Some(at) if role != Role::Balance => tx
+            .query_row(
+                "SELECT ordinal FROM cycle
+                  WHERE pool_id = ?1 AND closed_at IS NOT NULL AND last_obs_at IS NOT NULL AND last_obs_at < ?2
+                  ORDER BY ordinal DESC LIMIT 1",
+                params![pool, at],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?,
+        _ => None,
     };
     let prev: Option<Cycle> = match kept {
         Some(ordinal) => load_cycles_from(tx, pool, ordinal)?.into_iter().next().map(|(_, c)| c),
@@ -1144,7 +1397,31 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         )
         .optional()
         .map_err(sql)?;
-    let after = prev.as_ref().and_then(|c| c.last_obs_at);
+    let any_cycle: bool = tx
+        .query_row("SELECT EXISTS (SELECT 1 FROM cycle WHERE pool_id = ?1)", [pool], |r| r.get(0))
+        .map_err(sql)?;
+    let at_prev: Option<Sample> = match s_prev {
+        Some(at) => tx
+            .query_row(
+                &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at = ?2"),
+                params![pool, at],
+                sample_row,
+            )
+            .optional()
+            .map_err(sql)?,
+        None => None,
+    };
+    // A dated pool folded before with no cycle at all has only ever been
+    // rolling: every reading so far is in its rolling stretch.
+    let seed: Option<Sample> = at_prev
+        .filter(|s| prev.is_none() && !any_cycle && role != Role::Balance && s.reset_at.is_some());
+    let after = match (&prev, role) {
+        (Some(c), _) => c.last_obs_at,
+        // A balance's moves are between consecutive readings: the one
+        // before the point opens the first.
+        (None, Role::Balance) => s_prev,
+        (None, _) => seed.as_ref().map(|s| s.at),
+    };
     let gone = "SELECT id FROM cycle WHERE pool_id = ?1 AND ordinal > ?2";
     tx.execute(
         &format!("DELETE FROM segment WHERE cycle_id IN ({gone})"),
@@ -1189,13 +1466,15 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
     let banks = load_banks(tx, account)?;
     // Phase 2's seam: the resets in these samples.
     let found = resets::detect(&resets::DetectInput {
-        before: before.as_ref(),
+        // A rolling seed is never compared with what follows it.
+        before: before.as_ref().filter(|_| seed.is_none()),
         samples: &samples,
         banks: &banks,
         plans: &plans,
         thresholds: *t,
         role,
         effect_override: t.reset_effect.get(&provider).map(resets::EffectOverride::name),
+        rolling_seed: seed.as_ref(),
     });
     let out = fold::fold(&FoldInput {
         role,
@@ -1204,6 +1483,7 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         resets: &found,
         prev: prev.as_ref(),
         next_ordinal: keep_ordinal as u32 + 1,
+        rolling_seed: seed.as_ref(),
         thresholds: *t,
     });
     let mut ids: Vec<(i64, &Cycle)> = Vec::new();
@@ -1253,9 +1533,12 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
             rows.collect::<Result<_, _>>().map_err(sql)?
         };
         let mut loaded: Vec<(i64, Vec<Sample>)> = Vec::new();
+        // Only the stretch being re-folded: from the reading in force when
+        // its first span opens.
+        let open_at = after.or_else(|| samples.first().map(|s| s.at));
         for inc in linked {
             // From the reading in force at the re-fold point, not after it.
-            let from: Option<f64> = match after {
+            let from: Option<f64> = match open_at {
                 Some(at) => tx
                     .query_row(
                         "SELECT MAX(at) FROM sample WHERE pool_id = ?1 AND at <= ?2",
@@ -1265,7 +1548,7 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
                     .map_err(sql)?,
                 None => None,
             };
-            loaded.push((inc, load_samples(tx, inc, from.map(|f| f - 1e-3).or(after))?));
+            loaded.push((inc, load_samples(tx, inc, from.map(|f| f - 1e-3).or(open_at.map(|a| a - 1e-3)))?));
         }
         let included: Vec<overage::Included> = loaded
             .iter()
@@ -1414,6 +1697,55 @@ mod tests {
         assert_eq!(History::open(&p).unwrap().notice, None);
     }
 
+    fn aside_files(p: &Path) -> Vec<String> {
+        let mut out: Vec<String> = std::fs::read_dir(p.parent().unwrap())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".damaged-"))
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn two_set_asides_in_one_second_never_overwrite_each_other() {
+        let p = temp("aside-twice");
+        std::fs::write(&p, b"first damaged copy").unwrap();
+        std::fs::write(format!("{}-wal", p.display()), b"first wal").unwrap();
+        set_aside(&p, 1_000, None).unwrap().unwrap();
+        std::fs::write(&p, b"second damaged copy").unwrap();
+        set_aside(&p, 1_000, None).unwrap().unwrap();
+        let aside = aside_files(&p);
+        let kept: Vec<Vec<u8>> = aside
+            .iter()
+            .filter(|n| !n.ends_with("-wal"))
+            .map(|n| std::fs::read(p.parent().unwrap().join(n)).unwrap())
+            .collect();
+        assert!(kept.contains(&b"first damaged copy".to_vec()), "{aside:?}");
+        assert!(kept.contains(&b"second damaged copy".to_vec()), "{aside:?}");
+        assert_eq!(aside.iter().filter(|n| n.ends_with("-wal")).count(), 1, "{aside:?}");
+    }
+
+    #[test]
+    fn a_pane_late_to_a_damaged_file_never_moves_the_new_one_aside() {
+        let p = temp("aside-late");
+        std::fs::write(&p, b"damaged").unwrap();
+        // Both panes found this file damaged.
+        let failed = identity(&p);
+        // The first sets it aside and starts a new file.
+        assert!(set_aside(&p, 1_000, failed).unwrap().is_some());
+        let h = History::open(&p).unwrap();
+        assert_eq!(h.notice, None);
+        drop(h);
+        let fresh = identity(&p);
+        // The second, late, finds a different file there and leaves it.
+        assert_eq!(set_aside(&p, 1_000, failed).unwrap(), None);
+        assert_eq!(identity(&p), fresh);
+        assert_eq!(aside_files(&p).len(), 1);
+        assert_eq!(History::open(&p).unwrap().count("sample"), 0);
+    }
+
     #[test]
     fn samples_follow_the_change_and_heartbeat_rules_and_fold_into_cycles() {
         let p = temp("record");
@@ -1474,6 +1806,166 @@ mod tests {
         assert_eq!(cycles[0].peak_pct, Some(20.0));
         assert_eq!(cycles[1].closed_at, None);
         assert_eq!(h.since("codex", &key), Some(a + H));
+    }
+
+    #[test]
+    fn an_idle_stretch_written_pass_by_pass_never_erases_the_pools_cycles() {
+        let p = temp("idle");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let w = 5.0 * H;
+        let key = obs(vec![]).account_key();
+        let pass = |h: &mut History, at: f64, pct: f64, reset: f64| {
+            h.record(&[obs(vec![lane("primary_window", pct, at, reset, w)])], &t, at)
+                .unwrap();
+        };
+        for k in 0..3 {
+            let start = a + k as f64 * w;
+            for i in 1..5 {
+                pass(&mut h, start + i as f64 * H, 10.0 * i as f64, start + w);
+            }
+        }
+        // Idle past the end: every reading an unstarted window.
+        let idle = a + 3.0 * w + 600.0;
+        for i in 0..6 {
+            let at = idle + i as f64 * 300.0;
+            pass(&mut h, at, 0.0, at + w);
+        }
+        let closed = |h: &History| {
+            h.cycles("codex", &key, "primary_window")
+                .unwrap()
+                .iter()
+                .filter(|c| c.closed_at.is_some())
+                .count()
+        };
+        assert_eq!(closed(&h), 3);
+        // Used again: the history carries on from there.
+        let used = idle + 2.0 * H;
+        pass(&mut h, used, 5.0, used + w - 60.0);
+        pass(&mut h, used + H, 15.0, used + w - 60.0);
+        assert_eq!(closed(&h), 3);
+        let cycles = h.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(cycles.last().unwrap().peak_pct, Some(15.0));
+    }
+
+    /// How many samples one `record` of `o` reads.
+    fn reads_of(h: &mut History, o: Observation, at: f64) -> usize {
+        SAMPLES_READ.with(|n| n.set(0));
+        h.record(&[o], &Thresholds::default(), at).unwrap();
+        SAMPLES_READ.with(|n| n.get())
+    }
+
+    #[test]
+    fn one_write_reads_a_bounded_number_of_samples_however_long_the_history() {
+        let p = temp("bounded");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let w = 5.0 * H;
+        let balance = |left: f64, at: f64| Lane {
+            label: "credits".into(),
+            pool_key: "credits".into(),
+            role: PoolRole::Balance,
+            unit: Unit::Credits,
+            limit: Some(left),
+            pct: f64::NAN,
+            fetched_at: at,
+            ..Lane::default()
+        };
+        let rolling = |at: f64| Lane {
+            label: "rolling".into(),
+            pool_key: "rolling".into(),
+            pct: 20.0 + (at / 600.0) % 7.0,
+            window_secs: Some(w),
+            reset: Some(at + w),
+            fetched_at: at,
+            ..Lane::default()
+        };
+        let pass = |at: f64| {
+            let start = a + ((at - a) / w).floor() * w;
+            let pct = 10.0 + (at - start) / w * 80.0;
+            obs(vec![
+                lane("primary_window", pct, at, start + w, w),
+                balance(1000.0 - (at - a) / H, at),
+                rolling(at),
+            ])
+        };
+        // Forty 5h windows read every half hour: four hundred samples a pool.
+        let mut at = a + 60.0;
+        while at < a + 40.0 * w {
+            h.record(&[pass(at)], &Thresholds::default(), at).unwrap();
+            at += 0.5 * H;
+        }
+        assert!(h.count("sample") >= 1200, "{}", h.count("sample"));
+        let read = reads_of(&mut h, pass(at), at);
+        // About two windows of the dated pool (twenty), two of the balance
+        // and its linked pool's few, and a couple of the rolling one.
+        assert!(read <= 40, "one write read {read} samples");
+        // And what those bounded writes folded is what one fold over
+        // everything gives.
+        let key = obs(vec![]).account_key();
+        let spans = |h: &History| -> Vec<(f64, f64, f64, String)> {
+            let mut st = h
+                .conn
+                .prepare("SELECT at_lo, at_hi, amount, exhausted FROM overage_span ORDER BY overage_id, at_hi")
+                .unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        let before: Vec<_> = ["primary_window", "rolling"]
+            .iter()
+            .map(|k| h.cycles("codex", &key, k).unwrap())
+            .collect();
+        let spans_before = spans(&h);
+        assert!(!spans_before.is_empty());
+        let tx = h.conn.transaction().unwrap();
+        let pools: Vec<i64> = tx
+            .prepare("SELECT id FROM pool")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for pool in pools {
+            refold_pool(&tx, pool, None, &Thresholds::default()).unwrap();
+        }
+        tx.commit().unwrap();
+        let after: Vec<_> = ["primary_window", "rolling"]
+            .iter()
+            .map(|k| h.cycles("codex", &key, k).unwrap())
+            .collect();
+        assert_eq!(before, after);
+        assert_eq!(spans_before, spans(&h));
+    }
+
+    #[test]
+    fn an_outage_with_no_account_id_is_kept_under_the_last_account_seen() {
+        let p = temp("no-id");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let mut o = obs(vec![lane("primary_window", 10.0, a, a + WEEK, WEEK)]);
+        o.provider = "copilot".into();
+        h.record(&[o.clone()], &t, a).unwrap();
+        // The live call fails: no body, so no id, and the pane says why.
+        let mut down = o.clone();
+        down.account_id.clear();
+        down.lanes.clear();
+        down.watch = Some(super::super::WatchReading {
+            at: a + H,
+            state: "network".into(),
+            reason: "timed out".into(),
+        });
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.count("account"), 1, "an outage made an account of its own");
+        assert_eq!(h.count("watch_state"), 1);
+        assert_eq!(h.account_key_of(&down), o.account_key());
+        // A provider never seen with an id keeps its profile key.
+        let mut never = down.clone();
+        never.provider = "notion".into();
+        assert_eq!(h.account_key_of(&never), "profile:default");
     }
 
     #[test]
@@ -1565,6 +2057,7 @@ mod tests {
             thresholds: t,
             role: Role::Included,
             effect_override: None,
+            rolling_seed: None,
         });
         assert_eq!(found.len(), 1);
         let fresh = fold::fold(&FoldInput {
@@ -1574,6 +2067,7 @@ mod tests {
             resets: &found,
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: t,
         });
         let strip = |v: Vec<Cycle>| -> Vec<Cycle> {
@@ -1610,6 +2104,36 @@ mod tests {
             .cycles("codex", &obs(vec![]).account_key(), "secondary_window")
             .unwrap();
         assert_eq!(c[0].peak_pct, Some(30.0));
+    }
+
+    #[test]
+    fn a_new_detector_refolds_with_the_configured_thresholds() {
+        let p = temp("detector-config");
+        let a = 1_000_000.0;
+        // A fall to 3% while watching is a reset only with a near-zero of 5.
+        let t = Thresholds {
+            near_zero_pct: 5.0,
+            ..Thresholds::default()
+        };
+        {
+            let mut h = History::open(&p).unwrap();
+            for (at, pct) in [(a + H, 50.0), (a + H + 400.0, 3.0)] {
+                h.record(&[obs(vec![lane("secondary_window", pct, at, a + WEEK, WEEK)])], &t, at)
+                    .unwrap();
+            }
+            assert_eq!(h.count("reset_event"), 1);
+            h.conn
+                .execute("UPDATE meta SET v = '0' WHERE k = 'detector_version'", [])
+                .unwrap();
+        }
+        let mut r = super::super::Recorder::with_rollouts(p.clone(), Vec::new());
+        r.pass(&[], &t, a + 2.0 * H);
+        let h = History::open_with(&p, &t).unwrap();
+        assert_eq!(h.count("reset_event"), 1);
+        // The local zone is kept beside the times (§3.6).
+        assert!(h.meta("tz").unwrap().is_some());
+        assert!(h.meta("tz_offset").unwrap().is_some_and(|o| o.starts_with(['+', '-'])));
+        assert_eq!(h.meta("detector_version").unwrap().as_deref(), Some(&*fold::DETECTOR_VERSION.to_string()));
     }
 
     #[test]
@@ -1691,6 +2215,62 @@ mod tests {
         assert_eq!(unified.len(), 1);
         assert_eq!(vendor[0].spacexsi.as_deref(), Some("shared"));
         assert_eq!(h.since("spacexsi", &key), Some(5000.0));
+    }
+
+    #[test]
+    fn grok_keeps_one_vendor_pool_and_its_unified_copy_is_the_shared_weekly_pool() {
+        let p = temp("grok-link");
+        let mut h = History::open(&p).unwrap();
+        let mut o = obs(vec![lane("credits", 40.0, 5000.0, 600000.0, WEEK)]);
+        o.provider = "grok".into();
+        h.record(&[o.clone()], &Thresholds::default(), 5000.0).unwrap();
+        // Linked to the unified plan: same vendor pool, and SpaceXSI's copy
+        // in the pool Cursor's reading of it fills.
+        o.lanes = vec![lane("credits", 45.0, 9000.0, 600000.0, WEEK)];
+        o.spacexsi = Some(crate::shared::Spacexsi::Shared);
+        o.spacexsi_account = Some(o.account_key());
+        h.record(&[o.clone()], &Thresholds::default(), 9000.0).unwrap();
+        let key = o.account_key();
+        assert_eq!(h.samples("grok", &key, "credits").unwrap().len(), 2);
+        assert!(h.samples("grok", &key, "weekly_pool").unwrap().is_empty());
+        assert_eq!(h.samples("spacexsi", &key, "weekly_pool").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_shared_grok_read_without_cursor_keeps_to_the_plans_one_history() {
+        let p = temp("shared-grok");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let shared = Some(crate::shared::Spacexsi::Shared);
+        let mut cursor = obs(vec![lane("weekly_pool", 40.0, 5000.0, 600000.0, WEEK)]);
+        cursor.provider = "cursor".into();
+        cursor.account_id = "cursor-acct".into();
+        cursor.spacexsi = shared;
+        cursor.spacexsi_account = Some(cursor.account_key());
+        let mut grok = obs(vec![lane("credits", 41.0, 5000.0, 600000.0, WEEK)]);
+        grok.provider = "grok".into();
+        grok.account_id = "grok-acct".into();
+        grok.spacexsi = shared;
+        grok.spacexsi_account = cursor.spacexsi_account.clone();
+        h.record(&[cursor.clone(), grok.clone()], &t, 5000.0).unwrap();
+        // Cursor not read this pass: Grok names no plan key of its own.
+        grok.lanes = vec![lane("credits", 48.0, 9000.0, 600000.0, WEEK)];
+        grok.spacexsi_account = None;
+        h.record(&[grok.clone()], &t, 9000.0).unwrap();
+        let plan = cursor.account_key();
+        let accounts: i64 = h
+            .conn
+            .query_row("SELECT COUNT(*) FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(accounts, 1, "the unified plan's history forked");
+        let pcts: Vec<f64> = h
+            .samples("spacexsi", &plan, "weekly_pool")
+            .unwrap()
+            .iter()
+            .filter_map(|s| s.pct)
+            .collect();
+        assert_eq!(pcts, vec![40.0, 48.0]);
+        assert_eq!(h.spacexsi_key_of(&grok), Some(plan));
     }
 
     #[test]
@@ -1835,6 +2415,7 @@ mod tests {
             resets: &[],
             prev: None,
             next_ordinal: 1,
+            rolling_seed: None,
             thresholds: t,
         });
         let strip = |v: Vec<Cycle>| -> Vec<Cycle> {

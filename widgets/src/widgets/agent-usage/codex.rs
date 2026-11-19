@@ -82,6 +82,8 @@ pub struct Data {
     /// The rate_limits the newest rollout recorded, for when the live call
     /// cannot run. A snapshot from whenever Codex last spoke to the server.
     limits: Option<serde_json::Value>,
+    /// When `limits` was read from the server: the snapshot's own time.
+    limits_at: f64,
     sessions: usize,
     files: usize,
     /// Modification time of the newest rollout.
@@ -552,37 +554,89 @@ fn codex_rates(path: &str) -> Vec<f64> {
     rates
 }
 
-/// The newest rate_limits snapshot on disk.
+/// A rate_limits snapshot a rollout recorded, and when.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    pub limits: serde_json::Value,
+    /// The snapshot's own timestamp: when Codex read it from the server.
+    pub at: f64,
+}
+
+/// How much of a rollout's first line is read for its `session_meta`.
+const HEAD: u64 = 1024 * 1024;
+
+/// A file's first line, up to [`HEAD`] bytes; `None` when it is longer.
+fn first_line(path: &str) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    std::io::BufReader::new(f.take(HEAD)).read_until(b'\n', &mut buf).ok()?;
+    buf.ends_with(b"\n").then(|| String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// The newest snapshot of the main limit in one rollout, from a session of
+/// `account_id`'s: `head` is the rollout's first line, where Codex writes
+/// the `session_meta` naming the account that created the session, and
+/// `tail` its last lines. A metered feature's own limit (`codex_spark`) is
+/// not the account's primary window, and a session that names no account,
+/// or another one, says nothing about this account's.
+pub fn parse_snapshot(head: Option<&str>, tail: &[String], account_id: &str) -> Option<Snapshot> {
+    use crate::history::backfill::{RolloutLine, parse_rollout_line};
+    let meta = |line: &str| match parse_rollout_line(line) {
+        RolloutLine::Meta(who) => Some(who),
+        _ => None,
+    };
+    let mut who: Option<String> = head.and_then(meta).flatten();
+    let mut found = None;
+    for line in tail {
+        if line.contains("\"session_meta\"") {
+            if let Some(w) = meta(line) {
+                who = w;
+            }
+            continue;
+        }
+        if !line.contains("\"rate_limits\"") {
+            continue;
+        }
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let payload = &d["payload"];
+        let limits = match payload["rate_limits"].is_object() {
+            true => &payload["rate_limits"],
+            false => &payload["info"]["rate_limits"],
+        };
+        // Rollouts from before `limit_id` existed are the main limit.
+        if !limits.is_object() || limits["limit_id"].as_str().unwrap_or("codex") != "codex" {
+            continue;
+        }
+        let Some(at) = iso_epoch(&text(&d, "timestamp")) else {
+            continue;
+        };
+        if who.as_deref() == Some(account_id) {
+            found = Some(Snapshot { limits: limits.clone(), at });
+        }
+    }
+    found
+}
+
+/// The newest rate_limits snapshot of this account's main limit on disk.
 ///
 /// The server returns the account's windows with each response and the
 /// rollout writes them down, so the last one in the newest file is the
-/// freshest thing here. Only the tail is read: this is the fallback for a
-/// failed live call, and re-reading every rollout in full to find a number
-/// that is repeated at the end of one of them would be daft.
-fn newest_limits(files: &[String]) -> Option<serde_json::Value> {
-    for path in files.iter().take(SNAPSHOT_FILES) {
-        let mut found = None;
-        for line in tail_lines(path, TAIL) {
-            if !line.contains("\"rate_limits\"") {
-                continue;
-            }
-            let Ok(d) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let payload = &d["payload"];
-            let limits = match payload["rate_limits"].is_object() {
-                true => payload["rate_limits"].clone(),
-                false => payload["info"]["rate_limits"].clone(),
-            };
-            if limits.is_object() {
-                found = Some(limits);
-            }
-        }
-        if found.is_some() {
-            return found;
-        }
+/// freshest thing here. Only the tail is read, and the first line for the
+/// session's account: this is the fallback for a failed live call, and
+/// re-reading every rollout in full to find a number that is repeated at
+/// the end of one of them would be daft. With no account id there is no
+/// telling whose a snapshot is, and none is used.
+fn newest_limits(files: &[String], account_id: &str) -> Option<Snapshot> {
+    if account_id.is_empty() {
+        return None;
     }
-    None
+    files
+        .iter()
+        .take(SNAPSHOT_FILES)
+        .find_map(|path| parse_snapshot(first_line(path).as_deref(), &tail_lines(path, TAIL), account_id))
 }
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
@@ -678,7 +732,9 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     codex.last = listed[0].mtime as f64;
     // The quota fallback reads the newest rollout's tail on every pass:
     // it stands in for a live call that failed this pass, not for history.
-    codex.limits = newest_limits(&files);
+    let snapshot = newest_limits(&files, &codex.account_id);
+    codex.limits_at = snapshot.as_ref().map_or(0.0, |s| s.at);
+    codex.limits = snapshot.map(|s| s.limits);
     let asked = caches.readings.asked_at > 0.0;
     let pass = caches
         .rollouts
@@ -1465,9 +1521,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             apart: false,
             // The rollout's `primary` is the live call's `primary_window`.
             pool_key: "primary_window".into(),
-            // Written when Codex last spoke to the server: the rollout's
-            // own modification time is the nearest fact to that.
-            fetched_at: d.last,
+            // The snapshot's own timestamp: when Codex read it from the
+            // server, from a session of this account's main limit.
+            fetched_at: d.limits_at,
             ..Lane::default()
         }];
     };
@@ -2051,6 +2107,38 @@ mod tests {
             ..Data::default()
         };
         assert_eq!(lanes(&fallback)[0].pool_key, replayed[0].0);
+    }
+
+    #[test]
+    fn the_snapshot_fallback_reads_the_main_limit_of_this_accounts_sessions_at_its_own_time() {
+        let dir = std::env::temp_dir().join(format!("opscope-codex-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = |who: &str| {
+            format!(r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{{"id":"s","creator_account_id":"{who}"}}}}"#)
+        };
+        let main = r#"{"timestamp":"2026-10-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1000}}}}"#;
+        let spark = r#"{"timestamp":"2026-10-01T02:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_spark","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":12.0,"window_minutes":1440,"resets_at":3000}}}}"#;
+        // Newest first, as the listing hands them over: another account's
+        // session, then this account's, whose last line is Spark's.
+        let other = dir.join("b.jsonl");
+        std::fs::write(&other, format!("{}\n{main}\n", meta("acct-B"))).unwrap();
+        let ours = dir.join("a.jsonl");
+        std::fs::write(&ours, format!("{}\n{main}\n{spark}\n", meta("acct-A"))).unwrap();
+        let files = vec![other.to_string_lossy().into_owned(), ours.to_string_lossy().into_owned()];
+        let snap = newest_limits(&files, "acct-A").expect("a snapshot");
+        assert_eq!(snap.limits["limit_id"], "codex");
+        assert_eq!(snap.limits["primary"]["used_percent"], 26.0);
+        assert_eq!(snap.at, crate::iso_epoch("2026-10-01T01:00:00Z").unwrap());
+        // Dated by the snapshot, not by the file: the lane the history
+        // writes is this account's, at the time it was read.
+        let d = Data {
+            limits: Some(snap.limits.clone()),
+            limits_at: snap.at,
+            ..Data::default()
+        };
+        assert_eq!(lanes(&d)[0].fetched_at, snap.at);
+        // No session of this account's: nothing to stand in for it.
+        assert!(newest_limits(&files[..1], "acct-A").is_none());
     }
 
     #[test]
