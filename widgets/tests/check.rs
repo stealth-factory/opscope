@@ -1613,8 +1613,8 @@ fn render_luvus_module() -> String {
     out.push_str(&format!("id = \"{}\"\n", MODULE_ID));
     out.push_str("name = \"opscope\"\n");
     out.push_str(
-        "description = \"Terminal widgets that look like sci-fi movie panels \
-         and show only real data.\"\n",
+        "description = \"Mission control for your software factory: sci-fi \
+         terminal panels that show only real data.\"\n",
     );
     out.push_str(&format!("version = \"{}\"\n", version));
     out.push_str(&format!("min_luvus_version = \"{}\"\n", MIN_LUVUS_VERSION));

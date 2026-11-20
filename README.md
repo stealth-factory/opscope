@@ -1,10 +1,17 @@
 # opscope
 
-**Hollywood called. They want their terminal back.**
+**Mission control for your software factory.**
 
-*Sci-fi hacker panels from the movies — except these ones tell you the truth.*
+*Hollywood called. They want their terminal back.* Sci-fi hacker panels from
+the movies, except these ones tell you the truth.
 
 **[opscope.stealth-factory.co](https://opscope.stealth-factory.co)** — see every widget running live in your browser.
+
+A software factory is many AI coding agents working in parallel while you review
+and approve what ships. opscope fills the panes around them with the things
+that work needs watching: which agent is stuck, how much of each
+one's limit is left, which pull requests need a human, whether CI held and
+what went out.
 
 Fill your screen with glowing panels, scrolling graphs and blinking status
 readouts. The difference is that every number on them is real: actual network
@@ -14,6 +21,22 @@ waiting on you.
 [![opscope — click to watch the 1m54s demo](docs/demo-poster.jpg)](docs/demo.mp4)
 
 *Eight widgets running at once — every figure live. [Watch the 1m54s demo →](docs/demo.mp4)*
+
+## Made for software factories
+
+Each step of the agent loop has a widget that watches it. Put them in panes
+beside the agents, in tmux, Rex, Herdr or Luvus; the website's `factory`
+screen is one such layout.
+
+| Step | What you are watching | Widgets |
+|---|---|---|
+| Backlog | What the agents could pick up next, and the cycles they are in | `linear` |
+| Agents | Who is working, who is stuck, and who needs you | `mux-activity`, `agent-activity` |
+| Budget | Tokens used and rate limit left, per agent | `agent-usage` |
+| Review | The pull requests waiting on a human, and the order a stack merges in | `github-prs`, `github` |
+| CI | What is running, what keeps failing, and whether it is getting slower | `github-actions` |
+| Ship | Deployments, and the build log of the one that failed | `vercel-deployments` |
+| The floor | Dev servers, disks, processes and the network under all of it | `ports`, `disk`, `procs`, `netwatch`, `latency` |
 
 ## Run it
 

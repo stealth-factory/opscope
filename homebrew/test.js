@@ -112,7 +112,7 @@ test('a concurrent newer release is reread and never overwritten', t => {
 
 test('a same-version retry with different formula bytes fails before writing', t => {
   const { root, formula, previous } = updateFixture(t);
-  fs.writeFileSync(previous, formula.replace('Terminal widgets', 'Modified widgets'));
+  fs.writeFileSync(previous, formula.replace('Terminal mission control', 'Modified mission control'));
   const run = runUpdater(root);
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /already has a different formula/);
