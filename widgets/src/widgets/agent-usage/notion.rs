@@ -259,6 +259,9 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             stale: a.resets_in.is_some_and(|s| d.read_at + s <= now()),
             projected: false,
             apart: false,
+            pool_key: "rolling".into(),
+            fetched_at: d.read_at,
+            ..Lane::default()
         });
     }
     if let Some(w) = &a.period {
@@ -273,9 +276,27 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             stale: length.and(w.ends).is_some_and(|e| e <= now()),
             projected: false,
             apart: false,
+            pool_key: "period".into(),
+            fetched_at: d.read_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// What the history needs from Notion beyond its lanes: the workspace the
+/// allowance belongs to (its id is the account), its tier, and why the
+/// reading stopped.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let space = d.space.as_ref();
+    crate::history::Facts {
+        account_id: space.map(|s| s.id.clone()).unwrap_or_default(),
+        plan: space
+            .filter(|s| !s.tier.is_empty() && d.read_at > 0.0)
+            .map(|s| crate::history::PlanReading { at: d.read_at, plan: s.tier.clone() }),
+        bank: None,
+        why: d.why.clone(),
+    }
 }
 
 impl Data {

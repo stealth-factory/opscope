@@ -333,10 +333,10 @@ fn fresh_lanes(data: &Data) -> Vec<Lane> {
     };
     let mut out = Vec::new();
     if let Some(pct) = usage.standard.pct {
-        out.push(token_lane("standard", pct, usage.end));
+        out.push(token_lane("standard", pct, usage.end, data.read_at));
     }
     if let Some(pct) = usage.premium.pct {
-        out.push(token_lane("premium", pct, usage.end));
+        out.push(token_lane("premium", pct, usage.end, data.read_at));
     }
     out
 }
@@ -365,6 +365,9 @@ fn pool_lanes(pool: &FactoryPool, prefix: &str, apart_first: bool, read_at: f64)
             stale: reset.is_some_and(|reset| reset <= now()),
             projected: false,
             apart: apart_first && out.is_empty(),
+            pool_key: if prefix.is_empty() { label.to_string() } else { format!("{prefix}:{label}") },
+            fetched_at: read_at,
+            ..Lane::default()
         });
     }
     out
@@ -379,7 +382,7 @@ fn factory_reset(window: &FactoryWindow, read_at: f64) -> Option<f64> {
     window.window_end.filter(|end| *end > read_at)
 }
 
-fn token_lane(label: &str, pct: f64, end: Option<f64>) -> Lane {
+fn token_lane(label: &str, pct: f64, end: Option<f64>, read_at: f64) -> Lane {
     Lane {
         label: label.into(),
         pct,
@@ -388,6 +391,45 @@ fn token_lane(label: &str, pct: f64, end: Option<f64>) -> Lane {
         stale: end.is_some_and(|end| end <= now()),
         projected: false,
         apart: false,
+        pool_key: format!("{label}_tokens"),
+        unit: Unit::Tokens,
+        fetched_at: read_at,
+        ..Lane::default()
+    }
+}
+
+/// What the history needs from Droid beyond its lanes: the Factory user id
+/// the key belongs to, the plan, and why the reading stopped.
+/// Lanes the history keeps and no screen draws (OPS-307): the extra usage
+/// balance (`extraUsageBalanceCents`, so US dollars), with no ceiling and
+/// no cycle. A balance with no ceiling states what is left as its `limit`.
+pub fn history_lanes(data: &Data) -> Vec<Lane> {
+    let Some(balance) = data.billing.as_ref().and_then(|b| b.balance).filter(|b| b.is_finite()) else {
+        return Vec::new();
+    };
+    vec![Lane {
+        label: "extra usage balance".into(),
+        pct: f64::NAN,
+        stale: data.kept.is_some(),
+        pool_key: "extra_usage_balance".into(),
+        unit: Unit::Money { currency: "USD".into(), exponent: 2 },
+        role: PoolRole::Balance,
+        limit: Some(balance),
+        fetched_at: data.read_at,
+        ..Lane::default()
+    }]
+}
+
+pub fn history_facts(data: &Data) -> crate::history::Facts {
+    let auth = data.auth.as_ref();
+    crate::history::Facts {
+        account_id: auth.and_then(|a| a.user_id.clone()).unwrap_or_default(),
+        plan: auth
+            .and_then(|a| a.plan.clone().or_else(|| a.tier.clone()))
+            .filter(|p| !p.is_empty() && data.read_at > 0.0)
+            .map(|plan| crate::history::PlanReading { at: data.read_at, plan }),
+        bank: None,
+        why: data.why.clone(),
     }
 }
 

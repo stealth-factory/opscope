@@ -111,6 +111,13 @@ const EVENTS_TTL: f64 = 1800.0;
 pub struct Data {
     /// [`account_key_in`] of the pass's one read of the credentials.
     pub account: String,
+    /// The `sub` of the access token: the account, which outlives the
+    /// token. Empty when the token is not a readable JWT.
+    pub account_id: String,
+    /// When `live`, `prepaid` and `sand` were each fetched.
+    pub fetched_at: f64,
+    pub prepaid_at: f64,
+    pub sand_at: f64,
     /// The tracking database was readable; the counts below mean something.
     ok: bool,
     why: String,
@@ -747,7 +754,18 @@ fn credits_lane(d: &Data) -> Option<Lane> {
         stale: false,
         projected: false,
         apart: false,
+        pool_key: "prepaid".into(),
+        unit: usd(),
+        role: PoolRole::Balance,
+        used: Some((paid - left) / 100.0),
+        limit: Some(paid / 100.0),
+        fetched_at: d.prepaid_at,
     })
+}
+
+/// Cursor's money is US dollars, sent in cents.
+fn usd() -> Unit {
+    Unit::Money { currency: "USD".into(), exponent: 2 }
 }
 
 
@@ -1172,6 +1190,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 stale: false,
                 projected: false,
                 apart: false,
+                ..Lane::default()
             };
             rows.push(report_bar(&lane, LIMIT_LABEL, label_w, w, p, plots, rows.len()));
             let mut parts: Vec<(String, String)> = vec![
@@ -1683,7 +1702,20 @@ fn event_report(
         "events": t.counted,
         "days": days,
         "start_ms": start_ms, "end_ms": end_ms,
+        // Each charged request at its own instant, for the history's
+        // overage_event rows (OPS-307): the same page, no request added.
+        "charges": crate::history::overage::parse_cursor_charge_rows(events),
     })
+}
+
+/// The charged requests in the events report, for the history: against
+/// the unified plan's usage limit, or the own plan's extra usage.
+pub fn history_charges(d: &Data) -> Vec<crate::history::overage::Charge> {
+    let pool = if unified(d) { "usage_limit" } else { "extra" };
+    d.events
+        .as_ref()
+        .map(|report| crate::history::overage::parse_cursor_charges(report, pool))
+        .unwrap_or_default()
 }
 
 fn cursor_events(tok: Option<&str>, days: i64) -> Result<serde_json::Value, String> {
@@ -1834,6 +1866,12 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             d.live_kept = Some(k);
         }
     }
+    // When the usage reading on screen was fetched: a kept one's own time.
+    d.fetched_at = match d.live_kept.as_ref() {
+        Some(k) => k.at,
+        None => taken_at(caches, &live_key),
+    };
+    d.account_id = crate::parse::parse_jwt_subject(&text(&auth, "accessToken")).unwrap_or_default();
     // A plan cached for one account must never classify another.
     d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, || cursor_plan(tok));
     // The plan decides which drawing the live figures get, so a failed
@@ -1863,9 +1901,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // unified. Best-effort like the hard limit: the pool bar stands without
     // either, and the rows they feed say nothing rather than a guess.
     if is_unified(d.plan.as_ref()) {
-        d.prepaid = cached(caches, &format!("cursor-prepaid:{me}"), LIVE_TTL, || {
+        let prepaid_key = format!("cursor-prepaid:{me}");
+        d.prepaid = cached(caches, &prepaid_key, LIVE_TTL, || {
             cursor_rpc(tok, "GetUserPrepaidBilling", &serde_json::json!({}))
         });
+        d.prepaid_at = taken_at(caches, &prepaid_key);
         d.month = cached(caches, &format!("cursor-month:{me}"), PLAN_TTL, || {
             cursor_rpc(tok, "GetMonthlyBillingCycle", &serde_json::json!({}))
         });
@@ -1909,6 +1949,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     if d.sand.is_none() && !why.is_empty() {
         d.sand_why = why;
     }
+    d.sand_at = taken_at(caches, SAND_KEY);
     let path = under_home(".cursor/ai-tracking/ai-code-tracking.db");
     if !std::path::Path::new(&path).exists() {
         d.why = "no tracking database".into();
@@ -2000,6 +2041,11 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
                 stale: false,
                 projected: false,
                 apart: false,
+                // The same key Grok's reading of this pool carries, so the
+                // unified plan's history holds one pool, not two.
+                pool_key: crate::shared::SPACEXSI_POOL_KEY.into(),
+                fetched_at: d.fetched_at,
+                ..Lane::default()
             });
         }
         // Additional usage resets with the month, not the week, so it takes
@@ -2020,6 +2066,12 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
                 stale: false,
                 projected: false,
                 apart: true,
+                pool_key: "usage_limit".into(),
+                unit: usd(),
+                role: PoolRole::Overage,
+                used: extra_cents(&state).map(|(u, _)| u / 100.0),
+                limit: extra_cents(&state).map(|(_, l)| l / 100.0),
+                fetched_at: d.fetched_at,
             });
         }
         // What has been drawn from the prepaid balance, as a share of what
@@ -2042,7 +2094,10 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             reset,
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
+            pool_key: (*key).to_string(),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     // Extra usage is monthly like the three above it and resets with
@@ -2072,6 +2127,12 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             // `grok bot` with a window of its own - and it is still not a
             // fourth slice of them, which is why it takes the break.
             apart: true,
+            pool_key: "extra".into(),
+            unit: usd(),
+            role: PoolRole::Overage,
+            used: extra_cents(&state).map(|(u, _)| u / 100.0),
+            limit: extra_cents(&state).map(|(_, l)| l / 100.0),
+            fetched_at: d.fetched_at,
         });
     }
     // Its own window, not the billing cycle's. The summary ranks lanes
@@ -2086,9 +2147,32 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: true,
+            pool_key: "sand".into(),
+            fetched_at: d.sand_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// A fixed cap's spend and ceiling, in cents; `None` in any other state.
+fn extra_cents(state: &ExtraState) -> Option<(f64, f64)> {
+    match state {
+        ExtraState::Fixed { used, limit, .. } => Some((*used, *limit)),
+        _ => None,
+    }
+}
+
+/// What the history needs from Cursor beyond its lanes: the account the
+/// token names, the plan, and why the usage call is not answering.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let plan = d
+        .plan
+        .as_ref()
+        .map(|p| text(&p["planInfo"], "planName"))
+        .filter(|p| !p.is_empty() && d.fetched_at > 0.0)
+        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+    crate::history::Facts { account_id: d.account_id.clone(), plan, bank: None, why: d.live_why.clone() }
 }
 
 /// The three lanes cursor-agent's Usage view shows, plus the cycle.

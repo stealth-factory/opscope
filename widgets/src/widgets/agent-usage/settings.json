@@ -103,6 +103,28 @@
       "maximum": 30,
       "unit": "minutes"
     },
+    "history_watch_gap": {
+      "minimum": 1,
+      "unit": "minutes"
+    },
+    "history_near_zero": {
+      "minimum": 0,
+      "maximum": 100,
+      "unit": "percentage points"
+    },
+    "history_offline_fall": {
+      "minimum": 0,
+      "maximum": 100,
+      "unit": "percentage points"
+    },
+    "history_offline_fall_pct": {
+      "minimum": 0,
+      "maximum": 100,
+      "unit": "% of the earlier figure"
+    },
+    "history_reset_effect": {
+      "values": "string"
+    },
     "claude_config_dirs": {
       "items": "string-or-object"
     }
@@ -129,6 +151,16 @@
   "grok_ping": true,
   "_grok_ping_minutes_comment": "Minutes between enabled Grok quota polls. Thirty is the most it will take.\n\nA reading older than thirty-one minutes is drawn with the cached mark, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it.\n\nA larger number in a hand-edited file is clamped, and the tab says the interval actually used.",
   "grok_ping_minutes": 15.0,
+  "_history_watch_gap_comment": "The utilisation history compares each reading of a quota with the one before. Two readings this many minutes apart or closer are 'watching': data was flowing, so little can have happened unseen. Further apart is 'offline' - asleep, signed out, no network - and judged more loosely.\n\nUsed by reset detection. 15, about three normal polls, is the default.",
+  "history_watch_gap": 15.0,
+  "_history_near_zero_comment": "While watching, a quota is only taken to have been reset when its figure falls back to about zero: at or under this many percentage points. Usage cannot climb far between two close polls, so a real reset reads as a return to nought.\n\nUsed by reset detection. 1 is the default.",
+  "history_near_zero": 1.0,
+  "_history_offline_fall_comment": "After an offline gap, usage may have climbed again since a reset, so a smaller fall is accepted as evidence of one: at least this many percentage points, or history_offline_fall_pct percent of the earlier figure, whichever is larger. Smaller falls are recorded as adjustments and change nothing.\n\nUsed by reset detection. 3 is the default.",
+  "history_offline_fall": 3.0,
+  "_history_offline_fall_pct_comment": "The other half of the offline fall: a fall of at least this percent of the earlier figure counts, when that is larger than history_offline_fall points.\n\nUsed by reset detection. 5 is the default.",
+  "history_offline_fall_pct": 5.0,
+  "_history_reset_effect_comment": "OPTIONAL, per agent: what a reset did to its cycle, for the resets that carry no reset date to read it from. kept_boundary means the allowance refilled and the cycle ran on to its old end; restarted means a new cycle began at the reset. Keyed by agent, for example {\"droid\": \"restarted\"}; an agent or an effect not listed is ignored.\n\nA reset with a reset date on either side is always read from those dates and never from here, and every reset this fills in is marked as configured rather than seen. Empty, the default, records such a reset's effect as unknown.",
+  "history_reset_effect": {},
   "_share_readings_comment": "Share quota readings with every other agent-usage pane on this machine, so one pane asks each service and the rest read its answer. On by default.\n\nWithout it every pane asks every service itself, and with a few panes open Claude starts answering 'too many requests' to all of them.\n\nThe readings are kept in one small file in ~/.local/state/opscope, readable only by you: the latest reading per service and nothing older, written only when a reading is fetched. Turn it off to have this pane ask on its own; the pane then says it is not sharing, and each tab says when another pane fetched its readings.",
   "share_readings": true,
   "_notion_token_comment": "Notion AI's usage allowance, on Business and Enterprise workspaces: a rolling six-hour window and the billing period.\n\nNotion publishes no API for it, so the widget asks the one its web app uses, with your token_v2 session cookie.\n\n1. Sign in at app.notion.com and open developer tools.\n2. Open the cookies and copy the value of token_v2.\n3. Paste it here. A whole Cookie header copied from a request works too.\n\nIt is a full sign-in to your Notion account, not a scoped key, so keep this file chmod 600. The widget never reads it out of a browser. Empty reads the variable named in notion_token_env; empty there too and Notion has no tab.",

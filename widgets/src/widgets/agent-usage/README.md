@@ -2005,6 +2005,116 @@ not — it is simply the largest.
 Every bar carries its label and its number, so colour is never the only thing
 saying what a row is, and the pace mark is a glyph before it is a colour.
 
+## Utilisation history
+
+The quota bars say where each allowance stands now. The history remembers how
+each one ended. As a by-product of the readings the pane already fetches - no
+extra request, nothing redeemed - every pass writes what changed to
+`~/.local/state/opscope/agent-usage-history.sqlite`, readable only by you,
+kept for as long as the file is.
+
+A reading is written when its figure, an amount, its window or its reset
+instant changed, or when an hour has passed with nothing changing - proof the
+pane was watching through a flat stretch - and never more than once in five
+minutes per quota. Each is stamped with the time it was fetched, not the time
+the pane read it, so a laptop that slept or a reading another pane fetched
+lands where it belongs. A worked-out (`~`) window is never written; a cached
+reading is written as cached; a quota absent from a pass writes nothing.
+
+Accounts are kept apart by the provider's own account id - two Claude config
+directories signed into one account share one history, and two accounts never
+mix. On the unified Cursor and Grok plan the history is kept under SpaceXSI as
+well as under each product.
+
+From the readings it works out each cycle: where it began and ended, whether
+the next began where the last ended or at first use after a gap, how much of
+it was watched, and whether the last figure was taken so long before the end
+that it is only a lower bound. Windows nobody saw on a calendar-like quota are
+kept as empty cycles rather than guessed at.
+
+It also notices resets, wherever they were redeemed - another device, the
+provider's web app, or the provider itself - from what the server says
+afterwards: a reset instant that jumped, a figure that fell back to about zero
+while readings were flowing (or by a few points after a gap), or a banked
+reset credit that went from the list before its expiry. A new plan, limit or
+window, a scheduled end, and an idle window whose instant slid are ruled out
+first. Each reset is recorded between the two readings that bracket it, with
+what it did (kept the cycle's end and refilled the allowance, restarted the
+cycle, or unknown) and whether it was banked, issued by the provider, or
+unknown - "issued" only when the bank was read either side and nothing left it.
+A week used to 100%, reset, then used to 40% reads as 140% of one allowance and
+70% of the two that were available; a figure from before a reset nobody saw is
+kept as "at least". The bank's own grants, redemptions and expiries are logged
+too. A reset that happened while nothing was watching, and was climbed back
+past before the next reading with no instant or bank to show it, leaves no
+trace and is not recorded.
+
+### The HISTORY section
+
+Each agent's tab ends in a `── HISTORY ──` section, one chart per quota in
+the order the tab draws them, each titled with the quota and how far back it
+goes:
+
+```
+ ── HISTORY ── 7d · 11 cycles since 13 Oct
+ 100┤┆    ┆
+    │█┆┆  ▄ ┆┆
+  50┤█▅▇┆┆█┆▄▄▄
+    │███▄▄█▅███▂
+   0└───────────
+   ↺ ?????
+     10-13 11-18
+  last 11: avg at least 34% of allowance (6 closed; 4 cut short left out) · none hit 100% · at
+  least 74% peak with 1 unknown reset
+  resets ↺: 5 unknown
+  now: 6% so far · 4 cut short by a restart · 9 lower bounds (┆): latest 11-18 at least 37%, last
+  seen 86m before reset
+```
+
+- **One bar per cycle**, on a 0-100 scale of one allowance. A cycle that used
+  more than one allowance - a reset refilled it - carries on above 100 in a
+  second shade. Spend past the allowance (Claude's extra usage, Cursor's
+  on-demand) sits on top in its own colour and its own unit, with the money at
+  the top of the scale: it is never drawn as a percentage of an allowance it
+  is not part of.
+- **Marks.** Under a bar, `↺` with `B` for a banked reset, `I` for one the
+  provider issued and `?` for one nobody can tell; a cut-short cycle carries
+  the mark of the reset that restarted it. A hollow `·` is a cycle nobody saw.
+  An open top `┆` is "at least": the last reading came well before the cycle
+  ended. A thin `│` divides two plans, and the lines name them.
+- **The lines under each chart say everything it shows**, so text mode and a
+  reader who cannot see the colours lose nothing: the average share of an
+  allowance over the closed cycles shown (cut-short cycles left out and
+  counted, and "at least" where a lower bound is in it), how many hit 100%
+  and on which day of the cycle (hours in, for a 5-hour window), the peak and
+  the resets in it, resets by kind, banked resets that expired unused, the
+  spend past the allowance (each stretch of spend counted once, however many
+  cycles it is shown against), the cycle still running ("so far", never a
+  total), unseen cycles and lower bounds.
+- **A rolling quota** has no cycles, so it gets a line of each day's highest
+  reading instead, broken on a day with no reading.
+- **Spend past the plan** gets its own chart too, one bar per cycle on the
+  provider's own clock, in money or requests. **A balance** (Codex credits,
+  Devin and Droid's extra usage) has no cycle, so its chart is spend per
+  calendar month, and says so.
+
+A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
+file written by a newer opscope is left alone and the section says so in one
+line instead of drawing charts; a damaged one is renamed beside it, never
+deleted, and the line says that too. Until the first reading of an account is
+written, the section says nothing has been recorded yet.
+
+Four settings tune how resets are told from noise, and a fifth fills in what a
+reset did where nothing the provider sent says:
+
+| key | default | what it does |
+|---|---|---|
+| `history_watch_gap` | `15` | minutes. Two readings this close are "watching": data was flowing, so little can have happened unseen. Further apart is "offline" |
+| `history_near_zero` | `1` | percentage points. While watching, a reset reads as a figure falling back to at most this |
+| `history_offline_fall` | `3` | percentage points. After an offline gap, a fall of at least this - or `history_offline_fall_pct` of the earlier figure, whichever is larger - counts |
+| `history_offline_fall_pct` | `5` | percent of the earlier figure, the other half of the offline fall |
+| `history_reset_effect` | `{}` | per agent, `kept_boundary` or `restarted`: the effect recorded for a reset with no reset date to read it from, e.g. `{"droid": "restarted"}`. Marked as configured, never as seen; a reset with dates ignores it |
+
 ## The thing this widget does not do
 
 Nothing on this pane invents a denominator. Where an agent publishes a limit it

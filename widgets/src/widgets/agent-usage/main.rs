@@ -2082,6 +2082,15 @@ struct Config {
     /// Whether quota readings are shared with the other panes on this
     /// machine, so one asks each service and the rest read its answer.
     share_readings: bool,
+    /// The utilisation history's reset thresholds (spec §5.2, §5.3): two
+    /// readings this many minutes apart or closer are "watching"; a figure
+    /// at or under `history_near_zero` points is "about zero"; after a
+    /// longer gap a fall of `history_offline_fall` points or
+    /// `history_offline_fall_pct` percent of the earlier figure, whichever
+    /// is larger, counts. `history_reset_effect` names, per provider, the
+    /// effect of a reset with no instant to read one from. Read by reset
+    /// detection (OPS-305).
+    history: crate::history::Thresholds,
     /// Notion's `token_v2` session cookie. Empty reads `notion_token_env`.
     notion_token: String,
     /// The environment variable holding that cookie when `notion_token` is
@@ -2162,6 +2171,15 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .get("share_readings")
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
+        history: crate::history::Thresholds {
+            watch_gap_secs: tc::cfg_f64(&raw, "history_watch_gap", 15.0).max(1.0) * 60.0,
+            near_zero_pct: tc::cfg_f64(&raw, "history_near_zero", 1.0).clamp(0.0, 100.0),
+            offline_fall_pts: tc::cfg_f64(&raw, "history_offline_fall", 3.0).clamp(0.0, 100.0),
+            offline_fall_share: tc::cfg_f64(&raw, "history_offline_fall_pct", 5.0).clamp(0.0, 100.0),
+            // Per provider, `{"droid": "restarted"}`; absent or unknown is
+            // no override, so an event with no instant stays `unknown`.
+            reset_effect: crate::history::resets::ResetEffects::from_config(&raw["history_reset_effect"]),
+        },
         notion_token: tc::cfg_str(&raw, "notion_token", ""),
         notion_token_env: tc::cfg_str(&raw, "notion_token_env", crate::notion::TOKEN_ENV),
         notion_workspace: tc::cfg_str(&raw, "notion_workspace", ""),
@@ -2840,6 +2858,8 @@ fn main() {
         let saved_at = store::path();
         store::restore(&mut caches, &saved_at);
         let mut saver = store::Saver::new(now());
+        // The history file, opened on the first pass and kept open.
+        let mut recorder = history::Recorder::new(history::store::path());
         let mut asked = false;
         // When the shared store was last tried and could not be opened, so
         // a store that cannot be made is not tried again on every pass.
@@ -2881,7 +2901,14 @@ fn main() {
                         g.installed = installed.clone();
                     }
                 }
-                vendors::read_all(&mut caches, &cfg, installed)
+                let mut found = vendors::read_all(&mut caches, &cfg, installed);
+                // The utilisation history is a by-product of the pass: what
+                // it read, written where it changed (OPS-304). The recorder
+                // catches its own panics and says why on its status line, so
+                // one there never discards the readings this pass fetched.
+                let at = now();
+                found.history = recorder.pass(&vendors::observations(&found, at), &cfg.history, at);
+                found
             }));
             // The press is spent on the pass it asked for. Left standing, a
             // reading kept for being under the floor would be asked again
@@ -3254,6 +3281,7 @@ mod copilot;
 mod cursor;
 mod grok;
 mod vendors;
+mod history;
 
 #[cfg(test)]
 mod tests {
