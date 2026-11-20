@@ -1,7 +1,7 @@
 {
   "name": "opscope",
   "version": "0.0.0-dev",
-  "description": "Sci-fi terminal widgets that show only real data.",
+  "description": "Mission control for your software factory: terminal widgets for coding agents, pull requests, CI and deploys, showing only real data.",
   "bin": {
     "opscope": "bin/opscope"
   },
@@ -41,6 +41,12 @@
     "terminal",
     "tui",
     "widgets",
-    "dashboard"
+    "dashboard",
+    "software-factory",
+    "ai-agents",
+    "coding-agents",
+    "claude-code",
+    "codex",
+    "tmux"
   ]
 }
