@@ -1,7 +1,7 @@
 # opscope
 
 **Mission control for your software factory.** Sci-fi terminal widgets for
-coding agents, pull requests, CI and deploys, showing only real data.
+AI coding agents, pull requests, CI and deploys, showing only real data.
 
 ```sh
 npx opscope                 # the menu

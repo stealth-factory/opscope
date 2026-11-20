@@ -7,7 +7,7 @@ the movies, except these ones tell you the truth.
 
 **[opscope.stealth-factory.co](https://opscope.stealth-factory.co)** — see every widget running live in your browser.
 
-A software factory is many coding agents working in parallel while you review
+A software factory is many AI coding agents working in parallel while you review
 and approve what ships. opscope fills the panes around them with the things
 that work needs watching: which agent is stuck, how much of each
 one's limit is left, which pull requests need a human, whether CI held and

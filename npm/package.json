@@ -1,7 +1,7 @@
 {
   "name": "opscope",
   "version": "0.0.0-dev",
-  "description": "Mission control for your software factory: terminal widgets for coding agents, pull requests, CI and deploys, showing only real data.",
+  "description": "Mission control for your AI software factory: terminal widgets for AI coding agents, pull requests, CI and deploys, showing only real data.",
   "bin": {
     "opscope": "bin/opscope"
   },
@@ -43,7 +43,9 @@
     "widgets",
     "dashboard",
     "software-factory",
+    "ai",
     "ai-agents",
+    "agent-monitoring",
     "coding-agents",
     "claude-code",
     "codex",
