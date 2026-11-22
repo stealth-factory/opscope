@@ -35,6 +35,7 @@
 //! memory, so two panes cannot both open a cycle; the unique keys back
 //! that up.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -273,6 +274,8 @@ pub struct History {
     pub path: PathBuf,
     /// Set when opening set a damaged file aside, to be said once.
     pub notice: Option<String>,
+    /// The readings this pane held back as unchanged ([`bridge`]).
+    seen: Seen,
 }
 
 /// The device and inode of the file at `path`, or `None` when there is none.
@@ -469,6 +472,7 @@ impl History {
             conn,
             path: path.to_path_buf(),
             notice: None,
+            seen: Seen::new(),
         };
         h.refold_if_detector_changed(t).map_err(Failure::other)?;
         Ok(h)
@@ -518,6 +522,7 @@ impl History {
 
     /// Write one pass and fold what it changed, in one transaction.
     pub fn record(&mut self, obs: &[Observation], t: &Thresholds, now: f64) -> Result<(), String> {
+        let seen = &mut self.seen;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -543,13 +548,13 @@ impl History {
             }
             let spacexsi_account = spacexsi_key(&tx, o, &key)?;
             let sx = o.spacexsi.map(super::spacexsi_name);
-            write_lanes(&tx, account, &o.lanes, sx, &mut refold)?;
+            write_lanes(&tx, account, &o.lanes, sx, seen, t.watch_gap_secs, &mut refold)?;
             // On the unified plan the lanes are kept twice (§3.4): under the
             // vendor, and under SpaceXSI, where its cycles are derived.
             let copy = spacexsi_account.as_ref().map(|_| o.for_spacexsi());
             if let (Some(sk), Some(u)) = (&spacexsi_account, &copy) {
                 let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
-                write_lanes(&tx, unified, &u.lanes, sx, &mut refold)?;
+                write_lanes(&tx, unified, &u.lanes, sx, seen, t.watch_gap_secs, &mut refold)?;
             }
             if let Some(b) = &o.bank {
                 // A bank event runs from the reading before this one, and
@@ -1038,11 +1043,16 @@ fn load_samples(conn: &Connection, pool: i64, after: Option<f64>) -> Result<Vec<
 
 /// Write one lane per pool, under the five-minute and change-or-heartbeat
 /// rules, noting which pools need folding from where.
+///
+/// `seen` is this pane's memory of the live readings it was handed and did
+/// not write because nothing had changed; see [`bridge`].
 fn write_lanes(
     tx: &Transaction,
     account: i64,
     lanes: &[Lane],
     spacexsi: Option<&str>,
+    seen: &mut Seen,
+    watch_gap: f64,
     refold: &mut Vec<(i64, f64)>,
 ) -> Result<(), String> {
     for lane in lanes {
@@ -1062,20 +1072,81 @@ fn write_lanes(
             source: if lane.stale { Source::Cached } else { Source::Live },
             spacexsi: spacexsi.map(str::to_string),
         };
-        if write_sample(tx, pool, &sample)? {
-            refold.push((pool, sample.at));
+        let (before, after) = neighbours(tx, pool, sample.at)?;
+        if super::should_write(before.as_ref(), after.as_ref(), &sample) {
+            if let Some(r) = bridge(seen.get(&pool), before.as_ref(), after.as_ref(), &sample, watch_gap) {
+                if insert_sample(tx, pool, &r)? {
+                    refold.push((pool, r.at));
+                }
+            }
+            seen.remove(&pool);
+            if insert_sample(tx, pool, &sample)? {
+                refold.push((pool, sample.at));
+            }
+        } else if let (Some(b), None) = (&before, &after) {
+            // Held back as unchanged: remembered, in case the next change
+            // needs it to show the pane was watching.
+            if sample.source == Source::Live && sample.at > b.at && !super::changed(b, &sample) {
+                let kept = seen.entry(pool).or_default();
+                kept.retain(|r| sample.at - r.at <= watch_gap);
+                if kept.len() >= SEEN_MOST {
+                    kept.remove(0);
+                }
+                kept.push(sample);
+            }
         }
     }
     Ok(())
 }
 
+/// Per pool, the live readings this pane held back as unchanged since the
+/// last one written, newest last.
+pub(super) type Seen = HashMap<i64, Vec<Sample>>;
+
+/// At most this many held-back readings are remembered per pool: enough
+/// for a watch gap's worth of polls, whatever the poll.
+const SEEN_MOST: usize = 64;
+
+/// The held-back reading to write before `new`, when there is one.
+///
+/// Unchanged readings are not written until the hourly heartbeat (§3.7), so
+/// a pool watched through a flat stretch stores samples further apart than
+/// the watch gap, and the change that ends the stretch would be compared
+/// with the stretch's first reading as if nothing had been watching -
+/// offline - where a 20-point fall counts as a reset (§5.3). The pane did
+/// see the readings in between, so the latest of them that keeps the
+/// five-minute spacing from both neighbours, and is within the watch gap of
+/// `new`, is written first: a real reading, at its own fetch time, with the
+/// figures it had. A pane that saw nothing in between writes nothing, and
+/// the pair stays offline.
+fn bridge(seen: Option<&Vec<Sample>>, before: Option<&Sample>, after: Option<&Sample>, new: &Sample, watch_gap: f64) -> Option<Sample> {
+    let b = before?;
+    if after.is_some() || new.source != Source::Live || new.at - b.at <= watch_gap {
+        return None;
+    }
+    seen?
+        .iter()
+        .filter(|r| r.at >= b.at + super::MIN_GAP && r.at <= new.at - super::MIN_GAP && new.at - r.at <= watch_gap)
+        .max_by(|x, y| x.at.total_cmp(&y.at))
+        .cloned()
+}
+
 /// Insert `s` when [`super::should_write`] says so against the stored
 /// samples either side of it. True when it was written.
 fn write_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String> {
+    let (before, after) = neighbours(tx, pool, s.at)?;
+    if !super::should_write(before.as_ref(), after.as_ref(), s) {
+        return Ok(false);
+    }
+    insert_sample(tx, pool, s)
+}
+
+/// The stored samples of `pool` at or before `at`, and after it.
+fn neighbours(tx: &Transaction, pool: i64, at: f64) -> Result<(Option<Sample>, Option<Sample>), String> {
     let before: Option<Sample> = tx
         .query_row(
             &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at <= ?2 ORDER BY at DESC LIMIT 1"),
-            params![pool, s.at],
+            params![pool, at],
             sample_row,
         )
         .optional()
@@ -1083,14 +1154,16 @@ fn write_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String>
     let after: Option<Sample> = tx
         .query_row(
             &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at > ?2 ORDER BY at LIMIT 1"),
-            params![pool, s.at],
+            params![pool, at],
             sample_row,
         )
         .optional()
         .map_err(sql)?;
-    if !super::should_write(before.as_ref(), after.as_ref(), s) {
-        return Ok(false);
-    }
+    Ok((before, after))
+}
+
+/// Insert `s` as it is. True when it was new.
+fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String> {
     let n = tx
         .execute(
             &format!(
@@ -2252,6 +2325,40 @@ mod tests {
             })
             .unwrap();
         assert!(raw.contains("spent"), "{raw}");
+    }
+
+    #[test]
+    fn a_watched_flat_stretch_is_not_read_as_offline_when_it_moves() {
+        // CodeRabbit's case: polled every 30 s, 80% for half an hour, then
+        // 60%. Unchanged readings are not written until the hourly
+        // heartbeat, so the stored pair was 1,800 s apart - past the 900 s
+        // watch gap - and the 20-point fall passed the offline rule as a
+        // reset. The pane saw every reading in between.
+        let p = temp("watched-flat");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let end = a + 3.0 * 86_400.0;
+        let mut at = a;
+        while at < a + 1800.0 {
+            h.record(&[obs(vec![lane("secondary_window", 80.0, at, end, WEEK)])], &t, at).unwrap();
+            at += 30.0;
+        }
+        h.record(&[obs(vec![lane("secondary_window", 60.0, at, end, WEEK)])], &t, at).unwrap();
+        assert_eq!(h.count("reset_event"), 0, "a watched 80 -> 60 is an adjustment, not a reset");
+        let s = h.samples("codex", &obs(vec![]).account_key(), "secondary_window").unwrap();
+        let ats: Vec<f64> = s.iter().map(|x| x.at - a).collect();
+        // The first reading, the last unchanged one the pane saw at least
+        // five minutes before the change, and the change: all real readings.
+        assert_eq!(ats, vec![0.0, 1500.0, 1800.0]);
+        // A pane that was not watching - nothing seen in between - still
+        // reads the same pair as offline.
+        let q = temp("unwatched-flat");
+        let mut g = History::open(&q).unwrap();
+        g.record(&[obs(vec![lane("secondary_window", 80.0, a, end, WEEK)])], &t, a).unwrap();
+        g.record(&[obs(vec![lane("secondary_window", 60.0, a + 1800.0, end, WEEK)])], &t, a + 1800.0)
+            .unwrap();
+        assert_eq!(g.count("reset_event"), 1);
     }
 
     #[test]

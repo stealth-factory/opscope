@@ -2019,7 +2019,10 @@ pane was watching through a flat stretch - and never more than once in five
 minutes per quota. Each is stamped with the time it was fetched, not the time
 the pane read it, so a laptop that slept or a reading another pane fetched
 lands where it belongs. A worked-out (`~`) window is never written; a cached
-reading is written as cached; a quota absent from a pass writes nothing.
+reading is written as cached; a quota absent from a pass writes nothing. When a
+change ends a flat stretch the pane watched, the last unchanged reading it saw
+at least five minutes before the change is written too, at its own fetch time,
+so the stored pair shows the pane was watching rather than an hour-long gap.
 
 Accounts are kept apart by the provider's own account id - two Claude config
 directories signed into one account share one history, and two accounts never
