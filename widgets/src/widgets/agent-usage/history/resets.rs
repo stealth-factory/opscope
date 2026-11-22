@@ -435,9 +435,15 @@ fn verdict(x: &Pair, input: &DetectInput, banks: &[BankEvent], dated: bool) -> V
     let (kind, kind_rule) = if bank_fall {
         (ResetKind::Banked, "credit_spent")
     } else {
+        // Every reading from one side to the other a full list: a count
+        // alone in between cannot tell a credit spent from one granted
+        // beside it, so it is no evidence that nothing was spent.
         let clean = bank_around(input.banks, p.at, n.at).is_some_and(|(b1, b2)| {
-            b1.credits.is_some()
-                && b2.credits.is_some()
+            input
+                .banks
+                .iter()
+                .filter(|b| b.at >= b1.at && b.at <= b2.at)
+                .all(|b| b.credits.is_some())
                 && !banks.iter().any(|e| {
                     matches!(e.kind, BankEventKind::Redeemed | BankEventKind::Unexplained)
                         && e.at_lo >= b1.at
@@ -462,7 +468,9 @@ fn verdict(x: &Pair, input: &DetectInput, banks: &[BankEvent], dated: bool) -> V
     if bank_fall {
         fired.push("bank_fall");
     }
-    let before_known = x.watching && !rollover;
+    // Known only when a watched fall shows the figure just before the reset;
+    // a reset found by the bank or the instant alone has none (§5.7).
+    let before_known = x.watching && !rollover && pct_fall;
     let bank = x.bank.map(|i| &banks[i]);
     let t = &input.thresholds;
     let mut evidence = serde_json::json!({
@@ -579,26 +587,36 @@ pub fn bank_events(banks: &[BankReading]) -> Vec<BankEvent> {
     for pair in banks.windows(2) {
         let (b1, b2) = (&pair[0], &pair[1]);
         let mut found: Vec<(BankEventKind, u32, Option<f64>)> = Vec::new();
-        let mut add = |kind: BankEventKind, exp: Option<f64>| match found.iter_mut().find(|f| f.0 == kind) {
+        let mut add_n = |kind: BankEventKind, n: u32, exp: Option<f64>| match found.iter_mut().find(|f| f.0 == kind) {
             Some(f) => {
-                f.1 += 1;
+                f.1 = f.1.saturating_add(n);
                 f.2 = match (f.2, exp) {
                     (Some(a), Some(b)) => Some(a.min(b)),
                     (a, b) => a.or(b),
                 };
             }
-            None => found.push((kind, 1, exp)),
+            None => found.push((kind, n, exp)),
         };
         match (&b1.credits, &b2.credits) {
             (Some(l1), Some(l2)) => {
-                // The second list by identity; what the first does not claim
-                // is new.
-                let mut later: HashMap<String, Vec<&RawCredit>> = HashMap::new();
-                for c in l2 {
-                    later.entry(identity(c)).or_default().push(c);
+                let mut add = |kind: BankEventKind, exp: Option<f64>| add_n(kind, 1, exp);
+                // The second list by identity, as a multiset: each credit of
+                // the first claims one of the second with its identity -
+                // the one with its own status where there is one, so a list
+                // the provider reordered reads the same - and what nothing
+                // claims is new.
+                let mut by_id: HashMap<String, Vec<usize>> = HashMap::new();
+                for (j, c) in l2.iter().enumerate() {
+                    by_id.entry(identity(c)).or_default().push(j);
                 }
+                let mut claimed = vec![false; l2.len()];
                 for c in l1 {
-                    let now = later.get_mut(&identity(c)).and_then(|v| (!v.is_empty()).then(|| v.remove(0)));
+                    let now = by_id.get_mut(&identity(c)).and_then(|v| {
+                        let k = v.iter().position(|&j| l2[j].status == c.status).or((!v.is_empty()).then_some(0))?;
+                        let j = v.remove(k);
+                        claimed[j] = true;
+                        Some(&l2[j])
+                    });
                     if !is_held(&c.status) {
                         continue;
                     }
@@ -613,14 +631,10 @@ pub fn bank_events(banks: &[BankReading]) -> Vec<BankEvent> {
                         },
                     }
                 }
-                for c in l2 {
-                    let Some(v) = later.get_mut(&identity(c)) else {
-                        continue;
-                    };
-                    if v.is_empty() {
+                for (j, c) in l2.iter().enumerate() {
+                    if claimed[j] {
                         continue;
                     }
-                    v.remove(0);
                     add(BankEventKind::Granted, c.expires_at);
                     if is_spent(&c.status) {
                         add(BankEventKind::Redeemed, c.expires_at);
@@ -630,11 +644,12 @@ pub fn bank_events(banks: &[BankReading]) -> Vec<BankEvent> {
                 }
             }
             _ => {
-                for _ in b1.left..b2.left {
-                    add(BankEventKind::Granted, None);
-                }
-                for _ in b2.left..b1.left {
-                    add(BankEventKind::Unexplained, None);
+                // One row for the whole move, however large.
+                let n = |d: u64| u32::try_from(d).unwrap_or(u32::MAX);
+                if b2.left > b1.left {
+                    add_n(BankEventKind::Granted, n(b2.left - b1.left), None);
+                } else if b1.left > b2.left {
+                    add_n(BankEventKind::Unexplained, n(b1.left - b2.left), None);
                 }
             }
         }
@@ -830,6 +845,68 @@ mod tests {
         let c = &fold_with(&samples, &[e]).cycles[0];
         assert_eq!(c.allowances, 2);
         assert!(c.consumed_is_lower_bound);
+    }
+
+    #[test]
+    fn a_bank_only_reset_while_watching_an_idle_pool_has_no_known_figure_before_it() {
+        // CodeRabbit's case: 0% twice ten minutes apart, a credit redeemed
+        // between. Watching, but no reading shows the usage just before the
+        // reset, so what the cycle used is "at least" (§5.7).
+        let samples = vec![wk(A + H, 0.0), wk(A + H + 10.0 * M, 0.0)];
+        let banks = vec![
+            bank(A + H, vec![credit("c1", "available", Some(FAR))]),
+            bank(A + H + 10.0 * M, vec![credit("c1", "spent", Some(FAR))]),
+        ];
+        let e = one(&input(&samples, &banks, &[]));
+        assert_eq!(e.signals, "bank_fall");
+        assert!(!e.before_known);
+        assert_eq!(evidence(&e)["before_known"], false);
+        // A watched fall to zero still knows its figure.
+        let fell = vec![wk(A + H, 70.0), wk(A + H + 10.0 * M, 0.0)];
+        assert!(one(&input(&fell, &banks, &[])).before_known);
+    }
+
+    #[test]
+    fn a_count_only_reading_inside_the_bracket_leaves_the_reset_unknown() {
+        // CodeRabbit's case: credit c1 listed, then a count of one with no
+        // list, then credit c2 listed. Both count comparisons find nothing,
+        // but c1 may have been redeemed and c2 granted: not positive evidence
+        // that nothing was spent.
+        let samples = vec![wk(A + H, 60.0), wk(A + H + 10.0 * M, 0.0)];
+        let banks = vec![
+            bank(A + H, vec![credit("c1", "available", Some(FAR))]),
+            count_only(A + H + 5.0 * M, 1),
+            bank(A + H + 10.0 * M, vec![credit("c2", "available", Some(FAR))]),
+        ];
+        assert_eq!(one(&input(&samples, &banks, &[])).kind, ResetKind::Unknown);
+        // Lists all the way through, nothing spent: issued.
+        let clean = vec![
+            bank(A + H, vec![credit("c1", "available", Some(FAR))]),
+            bank(A + H + 5.0 * M, vec![credit("c1", "available", Some(FAR))]),
+            bank(A + H + 10.0 * M, vec![credit("c1", "available", Some(FAR))]),
+        ];
+        assert_eq!(one(&input(&samples, &clean, &[])).kind, ResetKind::Issued);
+    }
+
+    #[test]
+    fn anonymous_credits_are_matched_as_a_multiset_and_the_unmatched_ones_classified() {
+        // CodeRabbit's case: one held credit with no id becomes two with the
+        // same expiry, held and spent. One was granted and one redeemed,
+        // whichever order the provider lists them in.
+        let anon = |status: &str| RawCredit {
+            id: None,
+            status: status.into(),
+            expires_at: Some(FAR),
+        };
+        let before = bank(A + H, vec![anon("available")]);
+        for after in [vec![anon("available"), anon("spent")], vec![anon("spent"), anon("available")]] {
+            let ev = bank_events(&[before.clone(), bank(A + 2.0 * H, after)]);
+            let kinds: Vec<_> = ev.iter().map(|e| (e.kind, e.count)).collect();
+            assert_eq!(kinds, vec![(BankEventKind::Granted, 1), (BankEventKind::Redeemed, 1)]);
+        }
+        // A count that leaps is one row with the whole difference.
+        let up = bank_events(&[count_only(1.0, 0), count_only(2.0, 100_000)]);
+        assert_eq!((up[0].kind, up[0].count), (BankEventKind::Granted, 100_000));
     }
 
     #[test]
