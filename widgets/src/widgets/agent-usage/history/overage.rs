@@ -30,7 +30,7 @@
 //!
 //! What is written, and by whom:
 //!
-//! * [`spans`] is called by the store each time an `overage` or `balance`
+//! * [`spans_with`] is called by the store each time an `overage` or `balance`
 //!   pool is re-folded, with that pool's samples and those of every
 //!   included pool `pool_link` ties it to; its spans replace the pool's
 //!   `overage_span` rows from the same point on. Each span is one spend
@@ -207,11 +207,13 @@ fn exhausted_during(included: &[Included], lo: f64, hi: f64) -> Vec<i64> {
 /// no spend and makes no span. After a roll, what the new cycle already
 /// shows was spent between the boundary (or the reading before, if later)
 /// and the reading that showed it.
+#[cfg(test)]
 pub fn spans(role: Role, samples: &[Sample], included: &[Included], t: &Thresholds) -> Vec<Span> {
     spans_with(role, samples, included, t, &[])
 }
 
-/// [`spans`], with the grant expiries readings before `samples` stated
+/// The spend spans, as `spans` (above) describes them, with the grant
+/// expiries readings before `samples` stated
 /// (`stated`) - a balance's fall across one is expiry whichever reading
 /// said so, exactly as the full replay ([`read`]'s `balance_months`) reads
 /// it, so an incremental write and a full one cannot disagree about one move.
