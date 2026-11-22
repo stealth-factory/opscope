@@ -31,6 +31,11 @@ bypass warning, not a rejection. To stay off it:
   `main` did not move. If it did, stop and tell the user. Do not "fix" it
   with another push to `main`; revert through a pull request.
 
+**One feature, one pull request the user can run.** When a widget or an
+epic is built in parts, land it as a single pull request that can be built,
+tested and demoed whole before anything merges to `main`. Linear sub-issues
+track the parts; a stack of pull requests does not stand in for them.
+
 ## What this repo is
 
 Terminal widgets that look like sci-fi movie panels and show only real data.
@@ -72,6 +77,11 @@ the source did not report.
   same commit.
   **Use the section name the widget actually reads**; a mismatch is silently
   ignored.
+- **Google widgets take a long-lived credential, as `google-analytics`
+  does.** The setting holds the service-account JSON itself, or a path to
+  that file, and its help text says where and how to get the key. A
+  short-lived access token, or a `token_env` pointing at one, is the wrong
+  field for these widgets: it stops working within the hour.
 - **Secrets never enter the tree.** This repo is public. No tokens, no
   internal hostnames, no LAN addresses — in code, docs or commit messages.
 - **`cfg` decides where bytes come from; nothing else.** Three tiers, because

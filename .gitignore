@@ -29,3 +29,7 @@ config.json.*
 debian-dist/
 opscope_*_amd64.deb
 opscope_*_amd64.deb.sha256
+
+# Local tool state and Python bytecode left from before the Rust port.
+.cursor/hooks/state/
+__pycache__/
