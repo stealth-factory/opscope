@@ -67,7 +67,7 @@ pub fn section(
     if pools.is_empty() {
         wrapped(
             &mut rows,
-            "history: nothing recorded for this account yet; each reading is kept",
+            "history: no chart for this account yet",
             room,
             &p.dim,
             1,
@@ -387,7 +387,7 @@ pub fn summarise(bars: &[&CycleBar], expired: &[(f64, u32)]) -> Summary {
     }
     let from = bars.first().map_or(f64::INFINITY, |b| b.cycle.starts_at);
     s.expired = expired.iter().filter(|(at, _)| *at >= from).map(|(_, n)| n).sum();
-    let mut counted: Vec<(String, u64)> = Vec::new();
+    let mut counted: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
     for b in bars {
         let mut in_cycle: Vec<usize> = Vec::new();
         for o in &b.over {
@@ -408,8 +408,7 @@ pub fn summarise(bars: &[&CycleBar], expired: &[(f64, u32)]) -> Summary {
                 in_cycle.push(i);
                 s.over[i].cycles += 1;
             }
-            if !counted.contains(&o.key) {
-                counted.push(o.key.clone());
+            if counted.insert(o.key.clone()) {
                 s.over[i].total += o.amount;
                 s.over[i].spans_reset += o.spans_reset as usize;
             }
@@ -668,8 +667,15 @@ fn cycles_rows(
         if shown.iter().any(|b| !b.resets.is_empty()) {
             let mut marks = gutter("↺", lw, " ", p);
             for s in &slots {
+                // One letter a cycle: a cut-short cycle's is the restart
+                // that ended it, which its flag promises; otherwise the
+                // first. Every mark is still counted in the lines.
                 let mark = match s {
-                    Slot::Cycle(i) => bars[*i].resets.first().map(|r| r.mark),
+                    Slot::Cycle(i) => {
+                        let b = &bars[*i];
+                        let restart = b.resets.iter().find(|r| r.restarted).filter(|_| b.cycle.cut_short());
+                        restart.or(b.resets.first()).map(|r| r.mark)
+                    }
                     Slot::Divider => None,
                 };
                 let ink = match mark {
@@ -775,6 +781,9 @@ fn money_bars(
 ) -> usize {
     let most = values.iter().copied().fold(0.0, f64::max);
     let top = scale_text(&pool.unit, pool.currency.as_deref(), most);
+    // The bars are scaled to the figure the axis names - the largest spend
+    // rounded up - so a 4.5 under a `5` stops short of the top.
+    let limit = no_negative_zero(most.max(0.0)).ceil().max(f64::MIN_POSITIVE);
     let lw = tc::display_width(&top).max(1);
     let cells = room.saturating_sub(lw + 2).min(values.len());
     if cells == 0 {
@@ -783,7 +792,7 @@ fn money_bars(
     let shown = &values[values.len() - cells..];
     let height = 3;
     let columns: Vec<(f64, String)> = shown.iter().map(|v| (*v, p.agent.clone())).collect();
-    let plot = tc::Plot::bars(1 + lw + 1, rows.len(), &columns, height, most.max(f64::MIN_POSITIVE), false);
+    let plot = tc::Plot::bars(1 + lw + 1, rows.len(), &columns, height, limit, false);
     for r in 0..height {
         let label = if r == 0 { top.clone() } else { String::new() };
         let mut parts = gutter(&label, lw, if r == 0 { "┤" } else { "│" }, p);
@@ -1141,6 +1150,44 @@ mod tests {
         assert!(text.contains("resets ↺: 1 banked, 1 issued, 1 unknown"), "{text}");
         assert!(text.contains("banked: 1 expired unused"), "{text}");
         assert!(text.contains("1 cut short by a restart"), "{text}");
+    }
+
+    #[test]
+    fn a_cut_short_cycle_shows_the_restart_that_ended_it_before_an_earlier_refill() {
+        // CodeRabbit's case: a banked refill and later the issued restart in
+        // one cycle. The mark row shows one letter per cycle, and the one a
+        // cut-short cycle promises is its restart's.
+        let mut t = tab();
+        let Body::Cycles(bars) = &mut t.pools[0].body else { unreachable!() };
+        let restart = bars[6].resets[0].clone();
+        bars[6].resets = vec![reset(bars[6].cycle.starts_at + DAY, Mark::Banked), restart];
+        let (rows, _) = draw(&t, 100);
+        let marks = rows.iter().find(|r| r.trim_start().starts_with('↺')).expect("a marks row");
+        let letters: String = marks.chars().filter(|c| "BI?".contains(*c)).collect();
+        assert_eq!(letters, "BI?");
+        // Every mark still counts in the totals.
+        assert!(rows.join("\n").contains("resets ↺: 2 banked, 1 issued, 1 unknown"));
+    }
+
+    #[test]
+    fn spend_bars_are_scaled_to_the_figure_on_their_axis() {
+        // CodeRabbit's case: the top label reads 5 for a largest spend of
+        // 4.5, so a 4.5 bar must stop short of the top, not reach it.
+        let p = crate::palette();
+        let pool = PoolHistory {
+            label: "credits".into(),
+            role: Role::Balance,
+            unit: "credits".into(),
+            ..pool(Body::Balance(Vec::new()), 2)
+        };
+        let mut rows = Vec::new();
+        let mut plots = Vec::new();
+        let names = vec!["Sep".to_string(), "Oct".to_string()];
+        let cells = money_bars(&mut rows, &[4.5, 1.0], &names, &pool, 60, &p, &mut plots);
+        assert_eq!(cells, 2);
+        assert!(plain(&rows[0]).contains("5┤"), "{rows:?}");
+        let top: String = plots[0].text_row(0).iter().map(|(_, g)| g.clone()).collect();
+        assert!(!top.starts_with('█'), "a 4.5 bar under a 5 label filled the top row: {top:?}");
     }
 
     #[test]

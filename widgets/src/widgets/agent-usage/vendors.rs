@@ -1337,7 +1337,7 @@ mod tests {
         s.history.charts.insert("cursor".into(), Default::default());
         let rows = plain(&history_rows("codex", &s, 80, &p, &mut plots));
         assert_eq!(rows.len(), 1, "{rows:?}");
-        assert!(rows[0].contains("nothing recorded"), "{rows:?}");
+        assert!(rows[0].contains("no chart for this account yet"), "{rows:?}");
         // A tab's own note is on that tab only.
         s.history.notes.insert("codex".into(), "1,234 backfilled from rollouts".into());
         let rows = plain(&history_rows("codex", &s, 200, &p, &mut plots)).concat();

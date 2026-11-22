@@ -2104,8 +2104,8 @@ goes:
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one
 line instead of drawing charts; a damaged one is renamed beside it, never
-deleted, and the line says that too. Until the first reading of an account is
-written, the section says nothing has been recorded yet.
+deleted, and the line says that too. Until an account has something to chart,
+the section says there is no chart for it yet.
 
 Four settings tune how resets are told from noise, and a fifth fills in what a
 reset did where nothing the provider sent says:
