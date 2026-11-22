@@ -518,9 +518,14 @@ let cycles = tc::Plot::stacked_columns(x, y, &[
 ```
 
 `stacked_columns` is agent-usage's utilisation history (OPS-306). In text a cell
-two parts share is the lower one's eighth block on the upper one's colour as a
-background, as a stacked bar shares a cell; pixels draw each part at its exact
-height. The marks are glyphs in text and small strokes in pixels, and the
+two parts fill between them is the lower one's eighth block on the upper one's
+colour as a background, as a stacked bar shares a cell; pixels draw each part at
+its exact height. A cell the parts leave partly empty, a cell three or more
+parts share, and any shared cell under `NO_COLOR` or with an upper colour that
+is not truecolour are drawn in one colour - the part holding most of the cell -
+as an eighth block of the height they reach together, so text never shows more
+of a cell filled than the pixels do. Callers must not rely on two parts being
+told apart by colour in text; the widget's lines carry what each part was. The marks are glyphs in text and small strokes in pixels, and the
 widget states every one of them in its text lines too.
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's

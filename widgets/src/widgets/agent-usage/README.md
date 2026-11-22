@@ -2026,8 +2026,11 @@ so the stored pair shows the pane was watching rather than an hour-long gap.
 
 Accounts are kept apart by the provider's own account id - two Claude config
 directories signed into one account share one history, and two accounts never
-mix. On the unified Cursor and Grok plan the history is kept under SpaceXSI as
-well as under each product.
+mix. A provider that sends no account id (Antigravity, Perplexity) is kept
+under the configured profile instead, or the default one, so two accounts
+signed in one after the other under the same profile share that profile's
+history. On the unified Cursor and Grok plan the history is kept under
+SpaceXSI as well as under each product.
 
 From the readings it works out each cycle: where it began and ended, whether
 the next began where the last ended or at first use after a gap, how much of

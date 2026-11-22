@@ -2143,21 +2143,31 @@ fn column_cell(column: &Column, top: f64, bottom: f64, peak: f64, floor: bool, n
             match inside.as_slice() {
                 [] => (String::new(), ' '),
                 [(_, hi, c)] => (c.to_string(), super::EIGHTHS[eighths(hi - bottom).max(1)]),
-                [(_, lower_hi, lower), (upper_lo, upper_hi, upper), ..] => {
-                    let k = eighths(lower_hi - bottom);
-                    let upper_share = upper_hi - upper_lo;
-                    let behind = rgb(upper).filter(|_| !no_colour);
-                    match behind {
-                        // The upper part fills most of the rest of the cell:
-                        // the lower one's block on the upper one's colour.
-                        Some([r, g, b]) if (1..8).contains(&k) && upper_share >= (top - lower_hi) / 2.0 => {
-                            (format!("{lower}\x1b[48;2;{r};{g};{b}m"), super::EIGHTHS[k])
+                many => {
+                    // How high the parts reach in this cell, together.
+                    let filled = eighths(many.iter().map(|(_, hi, _)| *hi).fold(bottom, f64::max) - bottom).max(1);
+                    let two_full = match many {
+                        [(_, lower_hi, lower), (_, _, upper)] => {
+                            let k = eighths(lower_hi - bottom);
+                            rgb(upper)
+                                .filter(|_| !no_colour && filled == 8 && (1..8).contains(&k))
+                                .map(|[r, g, b]| (format!("{lower}\x1b[48;2;{r};{g};{b}m"), super::EIGHTHS[k]))
                         }
-                        _ if upper_share > lower_hi - bottom => {
-                            (upper.to_string(), super::EIGHTHS[eighths(upper_hi - bottom).max(1)])
-                        }
-                        _ => (lower.to_string(), super::EIGHTHS[k.max(1)]),
-                    }
+                        _ => None,
+                    };
+                    // Two parts filling the cell: the lower one's block on
+                    // the upper one's colour. Otherwise - a cell they leave
+                    // partly empty, three or more parts, or no truecolour -
+                    // the whole height they reach, in the colour of the part
+                    // that holds most of it, so text never shows more of the
+                    // cell filled than the pixels do.
+                    two_full.unwrap_or_else(|| {
+                        let dominant = many
+                            .iter()
+                            .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+                            .map_or("", |(_, _, c)| c);
+                        (dominant.to_string(), super::EIGHTHS[filled])
+                    })
                 }
             }
         }
@@ -3511,6 +3521,26 @@ mod tests {
         assert_eq!(at(2, 4 * CELL_H - 1), &[220, 90, 80]);
         assert_eq!(at(2, CELL_H + 2), &[240, 200, 60]);
         assert_eq!(alpha_at(&px, w, 2, 2), 0, "nothing above 150");
+    }
+
+    #[test]
+    fn a_shared_text_cell_shows_the_height_the_parts_reach_in_the_colour_holding_most() {
+        let a = super::super::rgb(220, 90, 80);
+        let b = super::super::rgb(240, 200, 60);
+        let c = super::super::rgb(60, 160, 240);
+        // One row, 0-8 on the scale. CodeRabbit's cases: three parts of
+        // 1/8, 1/8 and 6/8 - the third holds most and the cell is full; and
+        // a lower half under an upper quarter, which must read as three
+        // quarters, not as a full cell painted with a background.
+        let columns = vec![
+            Column::Stack { parts: vec![(1.0, a.clone()), (1.0, b.clone()), (6.0, c.clone())], open: None },
+            Column::Stack { parts: vec![(4.0, a.clone()), (2.0, b.clone())], open: None },
+        ];
+        let plot = Plot::stacked_columns(0, 1, &columns, 1, 8.0);
+        let row = plot.text_row(0);
+        assert_eq!(row[0], (c.clone(), "█".to_string()));
+        assert!(!row[1].0.contains("48;2"), "no background on a cell left partly empty: {:?}", row[1]);
+        assert_eq!(row[1].1, "▆");
     }
 
     #[test]
