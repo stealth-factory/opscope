@@ -42,7 +42,7 @@ use std::time::Duration;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
 use super::fold::{
-    self, Cycle, CycleModel, EndReason, FoldInput, PlanChange, Role, Sample, Source, StartSource, Thresholds,
+    self, Cycle, CycleModel, EndReason, FoldInput, PlanChange, Role, Sample, Segment, Source, StartSource, Thresholds,
 };
 use super::{BankReading, Observation, WatchReading, backfill, overage, resets};
 use crate::shared::{Lane, Spacexsi};
@@ -1437,6 +1437,78 @@ fn load_cycles_from(conn: &Connection, pool: i64, from: i64) -> Result<Vec<(i64,
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
+/// The pool's latest cycle, when it is undated and still open and nothing
+/// after its last observation states an instant, as a [`fold::Resume`] to
+/// fold on from: what an append to it needs, without its earlier readings.
+fn open_undated(tx: &Transaction, pool: i64) -> Result<Option<fold::Resume>, String> {
+    let open: Option<(i64, i64)> = tx
+        .query_row(
+            "SELECT id, ordinal FROM cycle
+              WHERE pool_id = ?1 AND closed_at IS NULL AND cycle_model = 'undated' AND last_obs_at IS NOT NULL
+                AND ordinal = (SELECT MAX(ordinal) FROM cycle WHERE pool_id = ?1)",
+            [pool],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some((id, ordinal)) = open else {
+        return Ok(None);
+    };
+    let Some((_, mut cycle)) = load_cycles_from(tx, pool, ordinal)?.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(last) = cycle.last_obs_at else {
+        return Ok(None);
+    };
+    // A reading that states an instant turns the pool dated: folded whole.
+    let dated: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sample WHERE pool_id = ?1 AND at > ?2 AND reset_at IS NOT NULL)",
+            params![pool, last],
+            |r| r.get(0),
+        )
+        .map_err(sql)?;
+    if dated {
+        return Ok(None);
+    }
+    cycle.segments = {
+        let mut st = tx
+            .prepare("SELECT n, starts_at, ends_at, peak_pct FROM segment WHERE cycle_id = ?1 ORDER BY n")
+            .map_err(sql)?;
+        let rows = st
+            .query_map([id], |r| {
+                Ok(Segment {
+                    n: r.get::<_, i64>(0)? as u32,
+                    starts_at: r.get(1)?,
+                    ends_at: r.get(2)?,
+                    peak_pct: r.get(3)?,
+                })
+            })
+            .map_err(sql)?;
+        rows.collect::<Result<_, _>>().map_err(sql)?
+    };
+    let span = last - cycle.starts_at;
+    let covered = if span > 0.0 { cycle.coverage * span } else { 0.0 };
+    let latest = |col: &str| -> Result<Option<f64>, String> {
+        tx.query_row(
+            &format!(
+                "SELECT {col} FROM sample WHERE pool_id = ?1 AND at <= ?2 AND source != 'cached' AND {col} IS NOT NULL
+                  ORDER BY at DESC LIMIT 1"
+            ),
+            params![pool, last],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)
+    };
+    Ok(Some(fold::Resume {
+        last_pct: latest("pct")?,
+        last_used: latest("used_amount")?,
+        covered,
+        cycle,
+    }))
+}
+
 fn insert_cycle(tx: &Transaction, pool: i64, c: &Cycle) -> Result<i64, String> {
     let id: i64 = tx
         .query_row(
@@ -1495,8 +1567,9 @@ fn insert_cycle(tx: &Transaction, pool: i64, c: &Cycle) -> Result<i64, String> {
 /// has no cycle, and folds on from the sample before `from`; a pool that has
 /// only ever been rolling has no cycle either, and folds on from its last
 /// reading as a seed of its rolling stretch; and an overage or balance
-/// pool's linked included pools are read only over the stretch re-folded.
-/// What is still read whole is a pool's only cycle while it is open.
+/// pool's linked included pools are read only over the stretch re-folded;
+/// and an undated pool's open cycle - which may be its only one, and never
+/// close - is carried on from its last observation ([`open_undated`]).
 fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -> Result<(), String> {
     let (account, role, provider): (i64, String, String) = tx
         .query_row(
@@ -1590,7 +1663,19 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
     };
     let seed: Option<Sample> = at_prev
         .filter(|s| appended && prev.is_none() && !any_cycle && role != Role::Balance && s.reset_at.is_some());
+    // An undated pool's open cycle, carried on from rather than folded
+    // again from its first reading, when this write only adds readings
+    // after it.
+    let resume: Option<fold::Resume> = match appended && role != Role::Balance {
+        true => open_undated(tx, pool)?,
+        false => None,
+    };
+    let (prev, keep_ordinal, kept_id) = match &resume {
+        Some(r) => (None, r.cycle.ordinal as i64 - 1, None),
+        None => (prev, keep_ordinal, kept_id),
+    };
     let after = match (&prev, role) {
+        _ if resume.is_some() => resume.as_ref().and_then(|r| r.cycle.last_obs_at),
         (Some(c), _) => c.last_obs_at,
         // A balance's moves are between consecutive readings: the one
         // before the point opens the first.
@@ -1680,11 +1765,23 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         prev: prev.as_ref(),
         next_ordinal: keep_ordinal as u32 + 1,
         rolling_seed: seed.as_ref(),
+        resume: resume.as_ref(),
+        gone_at: None,
         thresholds: *t,
     });
     let mut ids: Vec<(i64, &Cycle)> = Vec::new();
     for c in &out.cycles {
         ids.push((insert_cycle(tx, pool, c)?, c));
+    }
+    // The resets the resumed cycle already held lost their cycle when its
+    // row was replaced: they are its again.
+    if let (Some(r), Some((id, _))) = (&resume, ids.first()) {
+        tx.execute(
+            "UPDATE reset_event SET cycle_id = ?1
+              WHERE pool_id = ?2 AND cycle_id IS NULL AND at_hi <= ?3 AND at_lo >= ?4",
+            params![id, pool, floor, r.cycle.starts_at],
+        )
+        .map_err(sql)?;
     }
     for e in &found {
         // The cycle it happened in: the one that observed its earlier
@@ -2104,6 +2201,67 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_whose_only_cycle_is_open_reads_only_its_new_samples_on_a_write() {
+        // The known gap: an undated pool that never falls back to zero -
+        // Claude's extra usage on a cap nobody reaches - has one open cycle
+        // and nothing closed to fold on from, so every write read its whole
+        // history. It now folds on from the open cycle itself.
+        let p = temp("open-only");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let claude = |used: f64, at: f64| Observation {
+            provider: "claude".into(),
+            account_id: "acct-open".into(),
+            heading: "CLAUDE".into(),
+            tab: "claude".into(),
+            lanes: vec![Lane {
+                label: "extra A$50".into(),
+                pct: 100.0 * used / 5000.0,
+                pool_key: "extra_usage".into(),
+                unit: Unit::Money { currency: "AUD".into(), exponent: 2 },
+                role: PoolRole::Overage,
+                used: Some(used),
+                limit: Some(5000.0),
+                fetched_at: at,
+                ..Lane::default()
+            }],
+            ..Observation::default()
+        };
+        // Twelve hundred readings, each a little more spent; with a gap
+        // over two hours now and then, so coverage is not trivially whole.
+        let mut at = a;
+        for i in 0..1200 {
+            h.record(&[claude(1.0 + i as f64 * 0.5, at)], &Thresholds::default(), at).unwrap();
+            at += if i % 97 == 0 { 3.0 * H } else { 0.5 * H };
+        }
+        assert!(h.count("sample") >= 1200);
+        let read = reads_of(&mut h, claude(1000.0, at), at);
+        assert!(read <= 5, "one write read {read} samples");
+        let key = claude(0.0, 0.0).account_key();
+        let stored = h.cycles("claude", &key, "extra_usage").unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].closed_at.is_none());
+        let spans_stored = h.count("overage_span");
+        let tx = h.conn.transaction().unwrap();
+        refold_pool(&tx, 1, None, &Thresholds::default()).unwrap();
+        tx.commit().unwrap();
+        let full = h.cycles("claude", &key, "extra_usage").unwrap();
+        assert_eq!(spans_stored, h.count("overage_span"));
+        // Equal to a fold over everything; coverage only to rounding, since
+        // the open cycle's watched time is carried as its stored fraction.
+        let (mut s, mut f) = (stored[0].clone(), full[0].clone());
+        assert!((s.coverage - f.coverage).abs() < 1e-9, "{} vs {}", s.coverage, f.coverage);
+        s.coverage = 0.0;
+        f.coverage = 0.0;
+        assert_eq!(s, f);
+        let segments = |h: &History| -> Vec<(i64, f64, Option<f64>)> {
+            let mut st = h.conn.prepare("SELECT n, starts_at, peak_pct FROM segment ORDER BY n").unwrap();
+            st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect()
+        };
+        assert_eq!(segments(&h).len(), 1);
+    }
+
+    #[test]
     fn one_write_reads_a_bounded_number_of_samples_however_long_the_history() {
         let p = temp("bounded");
         let mut h = History::open(&p).unwrap();
@@ -2316,6 +2474,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: t,
         });
         let strip = |v: Vec<Cycle>| -> Vec<Cycle> {
@@ -2865,6 +3025,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: t,
         });
         let strip = |v: Vec<Cycle>| -> Vec<Cycle> {

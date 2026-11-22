@@ -461,7 +461,32 @@ pub struct FoldInput<'a> {
     /// The reading before `samples`, when it is known to be in an
     /// established rolling stretch ([`rolling_mask`]).
     pub rolling_seed: Option<&'a Sample>,
+    /// An undated pool's open cycle to carry on from, rather than folding
+    /// it again from its first reading: `samples` are those after its last
+    /// observation. See [`Resume`].
+    pub resume: Option<&'a Resume>,
+    /// The time the pool's open cycle closes as `pool_gone` (§4), worked
+    /// out by the store from its siblings' readings; ignored unless it is
+    /// after the cycle's last observation.
+    pub gone_at: Option<f64>,
     pub thresholds: Thresholds,
+}
+
+/// An undated pool's open cycle as stored, to fold on from (the fold
+/// checkpoint for a pool that has nothing closed to keep: Claude's extra
+/// usage on a cap nobody reaches never falls back to zero, so its one cycle
+/// would otherwise be folded again from its first reading on every write).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resume {
+    /// The open cycle, with its segments; the last segment is the open one.
+    pub cycle: Cycle,
+    /// Seconds of it watched so far: its coverage times its span to its last
+    /// observation.
+    pub covered: f64,
+    /// The last figure and amount that can mark a boundary (not cached),
+    /// at or before its last observation.
+    pub last_pct: Option<f64>,
+    pub last_used: Option<f64>,
 }
 
 /// What a fold produced.
@@ -584,6 +609,36 @@ impl Building {
         }
     }
 
+    /// The open cycle a [`Resume`] holds, as it stood after its last
+    /// observation: [`Building::finish`] pushed its open segment, so that
+    /// segment is taken back off and carried on.
+    fn resumed(r: &Resume) -> Building {
+        let mut cycle = r.cycle.clone();
+        let open = cycle.segments.pop();
+        let seg_start = open.as_ref().map_or(cycle.starts_at, |s| s.starts_at);
+        let seg_peak = open.and_then(|s| s.peak_pct);
+        cycle.closed_at = None;
+        cycle.end_reason = None;
+        Building {
+            last_at: cycle.last_obs_at,
+            covered: r.covered,
+            seg_start,
+            seg_peak,
+            cycle,
+        }
+    }
+
+    /// Finish the cycle still open at the end of a fold: closed as
+    /// `pool_gone` at `gone` when that is after its last observation,
+    /// otherwise left open.
+    fn finish_open(self, gone: Option<f64>) -> Cycle {
+        let last = self.cycle.last_obs_at.unwrap_or(self.cycle.starts_at);
+        match gone.filter(|g| *g > last) {
+            Some(at) => self.finish(Some((at, EndReason::PoolGone))),
+            None => self.finish(None),
+        }
+    }
+
     fn observe(&mut self, s: &Sample, plans: &[PlanChange]) {
         let c = &mut self.cycle;
         if let Some(prev) = self.last_at {
@@ -693,6 +748,9 @@ pub fn fold(input: &FoldInput) -> FoldOutput {
             shape: PoolShape::Balance,
             cycles: Vec::new(),
         };
+    }
+    if input.resume.is_some() {
+        return fold_undated(input);
     }
     let dated = samples.iter().any(|s| s.reset_at.is_some());
     if !dated && input.prev.is_none_or(|p| p.model == CycleModel::Undated) {
@@ -940,7 +998,7 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
         prev_sample = Some(s);
     }
     if let Some(b) = cur {
-        out.push(b.finish(None));
+        out.push(b.finish_open(input.gone_at));
     }
     // A cycle whose model no boundary showed - the first one ever, or the
     // first after a plan, limit or window change - takes the model of the
@@ -1045,14 +1103,21 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
     let near = input.thresholds.near_zero_pct;
     let mut out = Vec::new();
     let mut ordinal = input.next_ordinal;
-    let mut cur: Option<Building> = None;
+    // Folding on from the open cycle itself, where the store has one.
+    let mut cur: Option<Building> = input.resume.map(Building::resumed);
     // The last figure that can mark a boundary: a cached one never does
     // (§4), so a cached zero between two live readings is no fall.
-    let mut last_pct: Option<f64> = input.prev.and_then(|p| p.peak_pct);
+    let mut last_pct: Option<f64> = match input.resume {
+        Some(r) => r.last_pct,
+        None => input.prev.and_then(|p| p.peak_pct),
+    };
     // The same for a figure stated only as an amount - spend with no cap,
     // so no percentage - which rolls when it falls back to nothing.
-    let mut last_used: Option<f64> = input.prev.and_then(|p| p.used_amount);
-    let mut prev_at: Option<f64> = None;
+    let mut last_used: Option<f64> = match input.resume {
+        Some(r) => r.last_used,
+        None => input.prev.and_then(|p| p.used_amount),
+    };
+    let mut prev_at: Option<f64> = input.resume.and_then(|r| r.cycle.last_obs_at);
     for s in input.samples {
         // A reset established at this sample (phase 2): only a bank fall or
         // the configured effect makes one on a pool with no instant.
@@ -1127,7 +1192,7 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
         prev_at = Some(s.at);
     }
     if let Some(b) = cur {
-        out.push(b.finish(None));
+        out.push(b.finish_open(input.gone_at));
     }
     // An inferred close is when the fall was seen, not when it happened: the
     // figure before it is the last one known, so it is a lower bound only if
@@ -1172,6 +1237,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: Thresholds::default(),
         })
     }
@@ -1622,6 +1689,8 @@ mod tests {
             prev: Some(&kept),
             next_ordinal: 2,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[1..].to_vec());
@@ -1644,6 +1713,8 @@ mod tests {
                 prev: Some(kept),
                 next_ordinal: kept.ordinal + 1,
                 rolling_seed: None,
+                resume: None,
+                gone_at: None,
                 thresholds: Thresholds::default(),
             });
             assert_eq!(
@@ -1750,6 +1821,8 @@ mod tests {
             prev: Some(&kept),
             next_ordinal: 3,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[2..].to_vec());

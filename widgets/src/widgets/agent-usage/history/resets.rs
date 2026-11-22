@@ -758,6 +758,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: Thresholds::default(),
         })
     }
@@ -1239,6 +1241,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: Thresholds::default(),
         });
         assert_eq!(out.cycles.len(), 2);

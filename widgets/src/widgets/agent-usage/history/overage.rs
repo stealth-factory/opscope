@@ -999,6 +999,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: t(),
         });
         assert_eq!(out.cycles.len(), 3);
@@ -1034,6 +1036,8 @@ mod tests {
             prev: None,
             next_ordinal: 1,
             rolling_seed: None,
+            resume: None,
+            gone_at: None,
             thresholds: t(),
         });
         assert_eq!(out.cycles.len(), 3);
