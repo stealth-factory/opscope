@@ -307,15 +307,7 @@ fn move_new(from: &Path, to: &Path) -> std::io::Result<()> {
 /// otherwise another pane has already set it aside and started a new file,
 /// and `None` says to open that one instead of moving it.
 fn set_aside(path: &Path, at: i64, failed: Option<(u64, u64)>) -> Result<Option<PathBuf>, String> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
-    let lock = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(&lock_path)
-        .map_err(|e| format!("cannot lock the damaged file: {e}"))?;
+    let lock = recovery_lock(path).map_err(|e| format!("cannot lock the damaged file: {e}"))?;
     lock.lock().map_err(|e| format!("cannot lock the damaged file: {e}"))?;
     let now = identity(path);
     if now.is_none() || (failed.is_some() && now != failed) {
@@ -338,18 +330,43 @@ fn set_aside(path: &Path, at: i64, failed: Option<(u64, u64)>) -> Result<Option<
             Err(e) => return Err(format!("cannot set the damaged file aside: {e}")),
         }
     };
+    move_sides(path, &aside)?;
+    Ok(Some(aside))
+}
+
+/// `<name>.lock`, which recovery holds exclusively while it moves a damaged
+/// file and its side files, and opening holds shared while it looks for
+/// the main file and makes a new one: so no pane starts a new file while
+/// the old one's WAL is still at the live path.
+fn recovery_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(format!("{}.lock", path.display()))
+}
+
+/// Move the WAL and shared-memory files after the main file set aside as
+/// `aside`. One that cannot follow is left exactly where it is - a WAL can
+/// hold committed history not yet in the main file, so it is never deleted -
+/// and the recovery is incomplete: no new file is started beside it (see
+/// [`History::open_once`]).
+fn move_sides(path: &Path, aside: &Path) -> Result<(), String> {
     for side in ["-wal", "-shm"] {
         let from = PathBuf::from(format!("{}{side}", path.display()));
         if from.exists() {
-            // A side file that cannot follow is removed rather than left to
-            // be replayed into the new file; the main file is already kept.
             let to = PathBuf::from(format!("{}{side}", aside.display()));
-            if move_new(&from, &to).is_err() {
-                let _ = std::fs::remove_file(&from);
-            }
+            move_new(&from, &to).map_err(|e| {
+                format!(
+                    "the damaged file was kept as {}, but its {side} file could not follow ({e}); it is left in place and no new file is started until it is moved",
+                    aside.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                )
+            })?;
         }
     }
-    Ok(Some(aside))
+    Ok(())
 }
 
 impl History {
@@ -409,6 +426,20 @@ impl History {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| Failure::other(format!("cannot make {}: {e}", dir.display())))?;
         }
+        // Shared against recovery's exclusive hold, so a damaged file's side
+        // files have either all moved or not started to.
+        let lock = recovery_lock(path).map_err(|e| Failure::other(format!("cannot lock it: {e}")))?;
+        lock.lock_shared().map_err(|e| Failure::other(format!("cannot lock it: {e}")))?;
+        // A WAL with no main file is a set-aside file's log that could not
+        // follow it: a new file beside it would have that log replayed
+        // into it. Nothing is created until it is moved.
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        if !path.exists() && wal.exists() {
+            return Err(Failure::other(format!(
+                "{} is still beside a missing history file; move it away to start a new one",
+                wal.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+            )));
+        }
         // Made before SQLite opens it, so it is 0600 whatever the umask; the
         // WAL and shared-memory files SQLite makes take the same mode.
         let existed = match std::fs::OpenOptions::new()
@@ -424,6 +455,7 @@ impl History {
         // The file as it is now, before SQLite opens it: what a damaged
         // verdict below is about.
         let id = identity(path);
+        drop(lock);
         History::open_conn(path, existed, t).map_err(|mut f| {
             f.identity = id;
             f
@@ -1909,6 +1941,40 @@ mod tests {
         assert_eq!(identity(&p), fresh);
         assert_eq!(aside_files(&p).len(), 1);
         assert_eq!(History::open(&p).unwrap().count("sample"), 0);
+    }
+
+    #[test]
+    fn a_side_file_that_cannot_follow_is_kept_and_recovery_says_it_is_incomplete() {
+        // CodeRabbit's case: the main file moved and its WAL could not. The
+        // WAL may hold committed history; it was deleted. It is kept now,
+        // and recovery reports itself incomplete.
+        let p = temp("aside-wal");
+        let wal = PathBuf::from(format!("{}-wal", p.display()));
+        std::fs::write(&wal, b"frames").unwrap();
+        let aside = PathBuf::from(format!("{}.damaged-x", p.display()));
+        // The name it would move to is taken, so the move fails.
+        std::fs::write(format!("{}-wal", aside.display()), b"other").unwrap();
+        let why = move_sides(&p, &aside).unwrap_err();
+        assert!(why.contains("-wal"), "{why}");
+        assert_eq!(std::fs::read(&wal).unwrap(), b"frames", "the WAL is still there, untouched");
+    }
+
+    #[test]
+    fn no_new_file_is_started_beside_a_log_left_from_a_set_aside_one() {
+        // CodeRabbit's case: a second pane could create and open a new file
+        // while the damaged one's WAL was still at the live path, and SQLite
+        // would replay it into the new file. With no main file and a WAL
+        // still beside it, nothing is created.
+        let p = temp("stale-wal");
+        let wal = PathBuf::from(format!("{}-wal", p.display()));
+        std::fs::write(&wal, b"frames").unwrap();
+        match History::open(&p) {
+            Err(OpenError::Failed(why)) => assert!(why.contains("-wal"), "{why}"),
+            Err(other) => panic!("{other:?}"),
+            Ok(_) => panic!("opened a new file beside a stale WAL"),
+        }
+        assert!(!p.exists(), "no main file was created");
+        assert_eq!(std::fs::read(&wal).unwrap(), b"frames");
     }
 
     #[test]
