@@ -98,8 +98,14 @@ pub struct Data {
     /// Why the billing request did not answer, so the billing drawn without
     /// it is not taken for all of it.
     subscription_why: String,
-    /// When the reading was taken.
+    /// When the reading was taken: the oldest of the answers drawn, for the
+    /// heading's "read ... ago".
     read_at: f64,
+    /// When the credits answer itself was fetched, which dates the credit
+    /// lanes: the answers are cached apart and can be of different ages.
+    credits_at: f64,
+    /// When the session answer that named the plan was fetched.
+    plan_at: f64,
     /// When the weekly limit's reading was taken.
     quota_at: f64,
     /// Where the cookie came from: `config`, `env`, or empty for none.
@@ -256,6 +262,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(got) = got.as_ref().filter(|_| d.why.is_empty()) {
         d.why = text(got, "why");
         d.read_at = num(got, "at");
+        d.credits_at = d.read_at;
         // A bonus that has expired since the reading is gone now, not at
         // the next fetch.
         d.credits = parse_perplexity_credits(&text(got, "body"), now());
@@ -320,6 +327,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(why) = plan.as_ref().map(|g| text(g, "why")).filter(|_| d.plan_why.is_empty()) {
         d.plan_why = why;
     }
+    d.plan_at = plan.as_ref().map_or(0.0, |g| num(g, "at"));
     d.plan = plan.and_then(|g| parse_perplexity_plan(&text(&g, "body")));
     let skey = format!("{key}:subscription");
     let mut refused = String::new();
@@ -452,7 +460,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             unit: Unit::Credits,
             used: Some(c.recurring.used),
             limit: Some(c.recurring.total),
-            fetched_at: d.read_at,
+            fetched_at: d.credits_at,
             ..Lane::default()
         });
     }
@@ -471,7 +479,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 role: PoolRole::Balance,
                 used: Some(pool.used),
                 limit: Some(pool.total),
-                fetched_at: d.read_at,
+                fetched_at: d.credits_at,
             });
         }
     }
@@ -486,8 +494,8 @@ pub fn history_facts(d: &Data) -> crate::history::Facts {
         plan: d
             .plan
             .clone()
-            .filter(|p| !p.is_empty() && d.read_at > 0.0)
-            .map(|plan| crate::history::PlanReading { at: d.read_at, plan }),
+            .filter(|p| !p.is_empty() && d.plan_at > 0.0)
+            .map(|plan| crate::history::PlanReading { at: d.plan_at, plan }),
         bank: None,
         why: if d.why.is_empty() { d.quota_why.clone() } else { d.why.clone() },
     }
@@ -501,6 +509,7 @@ impl Data {
         Data {
             credits: parse_perplexity_credits(raw, read_at),
             read_at,
+            credits_at: read_at,
             source: "config",
             ..Data::default()
         }
@@ -1376,6 +1385,26 @@ mod tests {
         assert!(session_names_no_plan(r#"{"user":{"email":"x"}}"#));
         assert!(!session_names_no_plan("{}"));
         assert!(!session_names_no_plan(r#"{"user":{"subscription_tier":3}}"#));
+    }
+
+    #[test]
+    fn credit_lanes_and_the_plan_are_dated_by_their_own_answers() {
+        // CodeRabbit's case: the answers are cached apart. The heading's
+        // time is the oldest of them, but credits refreshed at T+300 beside
+        // a weekly limit held from T are credits read at T+300, and a plan
+        // the session named at T+600 is a plan seen then.
+        let mut d = Data::answered(CARRIED_OVER);
+        d.read_at = 1_000.0;
+        d.credits_at = 1_300.0;
+        d.plan_at = 1_600.0;
+        d.plan = Some("max".into());
+        let credit_lanes: Vec<Lane> = lanes(&d).into_iter().filter(|l| l.unit == Unit::Credits).collect();
+        assert!(!credit_lanes.is_empty());
+        assert!(credit_lanes.iter().all(|l| l.fetched_at == 1_300.0));
+        assert_eq!(history_facts(&d).plan.unwrap().at, 1_600.0);
+        // A plan with no session time of its own is not dated by another's.
+        d.plan_at = 0.0;
+        assert!(history_facts(&d).plan.is_none());
     }
 
     #[test]

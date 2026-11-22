@@ -73,6 +73,11 @@ const CURSOR_LANES: &[(&str, &str, f64)] = &[
 /// reason at all.
 const SAND_METHOD: &str = "GetSandUsageStatus";
 const SAND_KEY: &str = "cursor:sand";
+
+/// The cache key of one account's sand reading.
+fn sand_key(account: &str) -> String {
+    format!("{SAND_KEY}:{account}")
+}
 /// The allowance is weekly, so this need not be brisk.
 const SAND_TTL: f64 = 900.0;
 
@@ -722,8 +727,16 @@ fn month_of(d: &Data) -> (Option<f64>, Option<f64>) {
 /// spend at zero, so it agrees today, and the prepaid call is the one that
 /// states it outright.
 fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
+    additional_state_from(d, live).0
+}
+
+/// [`additional_state`], and whether its spend came from the prepaid
+/// response - which is fetched on its own clock, so a lane carrying that
+/// spend is dated by it rather than by the usage reading.
+fn additional_state_from(d: &Data, live: &serde_json::Value) -> (ExtraState, bool) {
     let mut state = extra_state(live, d.hard.as_ref());
     let spent = d.prepaid.as_ref().and_then(|v| loose(&v["spentThisMonthCents"]));
+    let mut from_prepaid = false;
     // The account's own spend, so a user limit only: against a team pool
     // the pool's total is the figure, and one member's share of it would be
     // a partial presented as the whole.
@@ -731,11 +744,14 @@ fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
         match &mut state {
             ExtraState::Fixed { used, shared: false, .. }
             | ExtraState::Unlimited { used }
-            | ExtraState::Disabled { used } => *used = spent,
+            | ExtraState::Disabled { used } => {
+                *used = spent;
+                from_prepaid = true;
+            }
             ExtraState::Fixed { shared: true, .. } | ExtraState::NotReported { .. } => {}
         }
     }
-    state
+    (state, from_prepaid)
 }
 
 /// The prepaid balance as a lane: spent against paid, labelled with what
@@ -1939,7 +1955,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // this is an extra allowance, and an account without one is the normal
     // case rather than a fault.
     let mut why = String::new();
-    d.sand = cached(caches, SAND_KEY, SAND_TTL, || match sand_status(tok) {
+    // Keyed by account, as the live reading is: another account's
+    // allowance must never come back from the cache under this one.
+    let sand = sand_key(&me);
+    d.sand = cached(caches, &sand, SAND_TTL, || match sand_status(tok) {
         Ok(v) => Some(v),
         Err(e) => {
             why = e;
@@ -1949,7 +1968,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     if d.sand.is_none() && !why.is_empty() {
         d.sand_why = why;
     }
-    d.sand_at = taken_at(caches, SAND_KEY);
+    d.sand_at = taken_at(caches, &sand);
     let path = under_home(".cursor/ai-tracking/ai-code-tracking.db");
     if !std::path::Path::new(&path).exists() {
         d.why = "no tracking database".into();
@@ -2051,7 +2070,7 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
         // Additional usage resets with the month, not the week, so it takes
         // the monthly cycle - the weekly reset beside a monthly limit is the
         // wrong day, which is what this lane drew before.
-        let state = additional_state(d, live);
+        let (state, from_prepaid) = additional_state_from(d, live);
         if let Some(pct) = extra_lane_pct(&state) {
             let (start, end) = month_of(d);
             let month_secs = match (start, end) {
@@ -2071,7 +2090,9 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
                 role: PoolRole::Overage,
                 used: extra_cents(&state).map(|(u, _)| u / 100.0),
                 limit: extra_cents(&state).map(|(_, l)| l / 100.0),
-                fetched_at: d.fetched_at,
+                // The spend is the figure that moves; dated by the response
+                // that carried it.
+                fetched_at: if from_prepaid && d.prepaid_at > 0.0 { d.prepaid_at } else { d.fetched_at },
             });
         }
         // What has been drawn from the prepaid balance, as a share of what
@@ -4312,6 +4333,31 @@ mod tests {
         assert!(squeeze(&text).contains("usage limit no limit set"), "{text}");
         assert!(squeeze(&text).contains("$3.50 this month"), "{text}");
         assert!(!has_bar(&text, "usage limit"), "a bar of no limit: {text}");
+    }
+
+    #[test]
+    fn spend_the_prepaid_response_supplied_is_dated_by_that_response() {
+        // CodeRabbit's case: the usage request failed and the prepaid one
+        // answered, so the usage limit's spend is the prepaid figure, and
+        // its time is the prepaid response's, not the retained usage time.
+        let mut d = unified_data(true);
+        d.fetched_at = 1_000.0;
+        d.prepaid_at = 1_600.0;
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        let lane = lanes(&d).into_iter().find(|l| l.pool_key == "usage_limit").expect("the usage limit lane");
+        assert_eq!(lane.used, Some(3.5));
+        assert_eq!(lane.fetched_at, 1_600.0);
+        // With no prepaid spend, the usage reading's own time.
+        d.prepaid.as_mut().unwrap().as_object_mut().unwrap().remove("spentThisMonthCents");
+        if let Some(lane) = lanes(&d).into_iter().find(|l| l.pool_key == "usage_limit") {
+            assert_eq!(lane.fetched_at, 1_000.0);
+        }
+    }
+
+    #[test]
+    fn the_sand_reading_is_cached_per_account() {
+        assert_ne!(sand_key("a"), sand_key("b"));
+        assert!(sand_key("a").starts_with(SAND_KEY));
     }
 
     #[test]

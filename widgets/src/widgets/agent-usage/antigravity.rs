@@ -504,6 +504,9 @@ pub struct Data {
     /// answered.
     fetched_at: f64,
     gemini_at: f64,
+    /// When the tier answer (`currentTier`) was fetched: its own cache,
+    /// refreshed apart from the quota's.
+    tier_at: f64,
 }
 
 /// Whether a command line belongs to Antigravity's language server.
@@ -959,6 +962,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
             .map(|file| text(file, "auth_method"))
             .unwrap_or_default(),
         fetched_at: taken_at(caches, "antigravity-quota"),
+        tier_at: taken_at(caches, "antigravity"),
         ..Data::default()
     };
     // Local first: it is the app's own answer and moves as the app is used.
@@ -1258,13 +1262,41 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// account id is read, so the account is keyed on the profile; the plan is
 /// the Code Assist tier.
 pub fn history_facts(d: &Data) -> crate::history::Facts {
+    // Dated by the tier answer itself, which is cached apart from the quota.
     let tier = d
         .live
         .as_ref()
         .map(|l| text(&l["currentTier"], "id"))
-        .filter(|t| !t.is_empty() && d.fetched_at > 0.0)
-        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+        .filter(|t| !t.is_empty() && d.tier_at > 0.0)
+        .map(|plan| crate::history::PlanReading { at: d.tier_at, plan });
     crate::history::Facts { account_id: String::new(), plan: tier, bank: None, why: d.quota_why.clone() }
+}
+
+/// The lanes the history keeps for Antigravity, from [`lanes`]: the same,
+/// except that the summary's one "gemini busiest" lane - whichever model is
+/// busiest this pass - is kept as one pool per model. Each model's window
+/// has its own reset instant, and one pool holding them in turn would read
+/// a change of busiest model as its cycle ending.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let mut out: Vec<Lane> = lanes(d).into_iter().filter(|l| l.pool_key != "gemini_busiest").collect();
+    if has_gemini_group(&d.quota) {
+        return out;
+    }
+    for m in &d.gemini {
+        out.push(Lane {
+            label: m.model.clone(),
+            pct: 100.0 * (1.0 - m.left),
+            window_secs: None,
+            reset: m.reset,
+            stale: false,
+            projected: false,
+            apart: false,
+            pool_key: format!("gemini:{}", m.model),
+            fetched_at: d.gemini_at,
+            ..Lane::default()
+        });
+    }
+    out
 }
 
 /// Whether the summary carries a Gemini group of its own. The local server's
@@ -2317,6 +2349,35 @@ mod tests {
     }
 
     #[test]
+    fn the_history_keeps_each_gemini_model_in_its_own_pool() {
+        // CodeRabbit's case: the busiest model changes from one pass to the
+        // next, and one pool holding them in turn compared one model's reset
+        // instant with another's - a cycle change the quota never made.
+        let mut d = Data {
+            quota: google_summary(),
+            gemini: vec![model("gemini-2.5-pro", 1.0), model("gemini-3-flash", 0.4)],
+            gemini_at: 1_000.0,
+            ..Data::default()
+        };
+        let kept = history_lanes(&d);
+        let keys: Vec<&str> = kept.iter().map(|l| l.pool_key.as_str()).filter(|k| k.starts_with("gemini")).collect();
+        assert_eq!(keys, vec!["gemini:gemini-2.5-pro", "gemini:gemini-3-flash"]);
+        assert!(kept.iter().all(|l| l.pool_key != "gemini_busiest"));
+        let flash = kept.iter().find(|l| l.pool_key == "gemini:gemini-3-flash").unwrap();
+        assert!((flash.pct - 60.0).abs() < 1e-9);
+        assert_eq!(flash.fetched_at, 1_000.0);
+        // The summary still draws its one lane.
+        assert!(lanes(&d).iter().any(|l| l.pool_key == "gemini_busiest"));
+        // The tier is dated by its own answer, not the quota's.
+        d.live = Some(serde_json::json!({"currentTier": {"id": "free-tier"}}));
+        d.fetched_at = 5_000.0;
+        d.tier_at = 2_000.0;
+        assert_eq!(history_facts(&d).plan.unwrap().at, 2_000.0);
+        d.tier_at = 0.0;
+        assert!(history_facts(&d).plan.is_none(), "no tier time, no tier reading");
+    }
+
+    #[test]
     fn the_summary_gets_one_gemini_lane_for_the_busiest_model() {
         let d = Data {
             quota: google_summary(),
@@ -2574,6 +2635,7 @@ mod tests {
             gemini_why: String::new(),
             fetched_at: now() - 60.0,
             gemini_at: 0.0,
+            tier_at: 0.0,
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");

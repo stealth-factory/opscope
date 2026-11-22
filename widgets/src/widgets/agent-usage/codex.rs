@@ -180,6 +180,16 @@ fn codex_account(auth: &serde_json::Value) -> String {
     account_tag(&format!("{}\n{credential}", field("account_id")))
 }
 
+/// The account `auth` is signed in as: `tokens.account_id`, or the root
+/// `account_id` an older layout keeps - the one lookup the live request,
+/// the shared-cache key, the rollout snapshot and the history all use.
+fn account_id_in(auth: &serde_json::Value) -> String {
+    match text(&auth["tokens"], "account_id") {
+        s if !s.is_empty() => s,
+        _ => text(auth, "account_id"),
+    }
+}
+
 /// Register the tokens in `auth`, so no shared reading carries one.
 fn codex_secrets(caches: &mut Caches, auth: &serde_json::Value) {
     const TOKENS: &[&str] = &["access_token", "refresh_token", "id_token", "OPENAI_API_KEY"];
@@ -213,10 +223,7 @@ fn codex_live(auth: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     if tok.is_empty() {
         return Some(local_fact("no token - Codex has not signed in here"));
     }
-    let account = match text(&auth["tokens"], "account_id") {
-        s if !s.is_empty() => s,
-        _ => text(&auth, "account_id"),
-    };
+    let account = account_id_in(auth);
     let authz = format!("Bearer {}", tok);
     let usage_headers = [("Authorization", authz.as_str()), ("User-Agent", "opscope")];
     // The usage call stays as it was. The inventory is account-scoped, so
@@ -700,7 +707,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         }
     }
     let bank_at = taken_at(caches, &key);
-    let account_id = auth.as_ref().map(|a| text(&a["tokens"], "account_id")).unwrap_or_default();
+    let account_id = auth.as_ref().map(account_id_in).unwrap_or_default();
     let mut codex = Data {
         live,
         live_why,
@@ -1666,6 +1673,18 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_account_id_is_read_nested_then_at_the_root_everywhere() {
+        // CodeRabbit's case: the live request and the cache key accepted a
+        // root-level `account_id`; the snapshot lookup and the history read
+        // only the nested one, got nothing, and dropped every rollout.
+        let nested = serde_json::json!({"tokens": {"account_id": "acct-n"}, "account_id": "acct-r"});
+        let root = serde_json::json!({"tokens": {"access_token": "t"}, "account_id": "acct-r"});
+        assert_eq!(account_id_in(&nested), "acct-n");
+        assert_eq!(account_id_in(&root), "acct-r");
+        assert_eq!(account_id_in(&serde_json::json!({})), "");
+    }
 
     /// Two `token_count` events with the model named once before them.
     fn one_session(id: &str) -> String {

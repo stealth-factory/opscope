@@ -496,7 +496,11 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         if !present(name) {
             continue;
         }
-        let mut lanes = lanes_of(name, s);
+        let mut lanes = match name {
+            // One pool per Gemini model, where the summary has one lane.
+            "antigravity" => crate::antigravity::history_lanes(&s.antigravity),
+            _ => lanes_of(name, s),
+        };
         let facts = facts_of(s);
         if asked(&facts, &lanes) {
             // Overage and balances the summary draws no bar for (OPS-307).

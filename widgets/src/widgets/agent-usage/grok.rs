@@ -136,6 +136,10 @@ pub struct Data {
     /// Why the figure on screen is not the server's, when it is not. Empty
     /// when it is, or when nothing is asking.
     quota_why: String,
+    /// The account the token named when the quota was read, kept with it:
+    /// resolving it again when the history is written could pair this
+    /// quota with an account signed in since.
+    account_id: String,
     /// Where this account stands relative to the unified plan, once both
     /// vendors have been read. Set by `vendors::link_spacexsi`.
     pub spacexsi: Spacexsi,
@@ -692,8 +696,10 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     if !refreshed {
         refresh_if_token_lapsing(caches, cfg, newest);
     }
+    let account_id = token_account().unwrap_or_default();
     let quota_read = quota_now(caches, cfg);
     Data {
+        account_id,
         ok: true,
         history,
         sessions,
@@ -1276,7 +1282,7 @@ pub fn history_facts(d: &Data) -> crate::history::Facts {
         .as_ref()
         .filter(|q| !q.tier.is_empty())
         .and_then(|q| Some(crate::history::PlanReading { at: q.taken.filter(|t| *t > 0.0)?, plan: q.tier.clone() }));
-    crate::history::Facts { account_id: account_id().unwrap_or_default(), plan, bank: None, why: d.quota_why.clone() }
+    crate::history::Facts { account_id: d.account_id.clone(), plan, bank: None, why: d.quota_why.clone() }
 }
 
 /// True when nothing is asking the server on the reader's behalf, so the
@@ -1830,6 +1836,18 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_history_pairs_a_quota_with_the_account_read_beside_it() {
+        // CodeRabbit's case: the auth file changing after the poll handed
+        // the history this quota under the new account's id. The id is the
+        // one kept with the quota, never read again.
+        let d = Data {
+            account_id: "user-at-poll".into(),
+            ..Data::own_plan_fixture()
+        };
+        assert_eq!(history_facts(&d).account_id, "user-at-poll");
+    }
 
     #[test]
     fn a_session_read_as_it_grows_matches_one_read_whole() {
@@ -2638,6 +2656,7 @@ mod tests {
             quota_at: 0.0,
             quota_every: 0.0,
             quota_why: String::new(),
+            account_id: String::new(),
             spacexsi: Spacexsi::No,
         };
         for w in [40usize, 80, 200] {
