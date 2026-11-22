@@ -2036,7 +2036,12 @@ From the readings it works out each cycle: where it began and ended, whether
 the next began where the last ended or at first use after a gap, how much of
 it was watched, and whether the last figure was taken so long before the end
 that it is only a lower bound. Windows nobody saw on a calendar-like quota are
-kept as empty cycles rather than guessed at.
+kept as empty cycles rather than guessed at. A quota that stops appearing in
+live readings for a whole window while the account's other quotas go on
+answering closes its cycle as gone; one missing while the pane slept, while
+fetches failed, while readings were only cached, or last read at about zero
+(Claude leaves an unused limit out) is not gone, and one that comes back is
+judged again with that reading.
 
 It also notices resets, wherever they were redeemed - another device, the
 provider's web app, or the provider itself - from what the server says

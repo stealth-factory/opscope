@@ -565,6 +565,9 @@ impl History {
         let mut account_refold: Vec<(i64, f64)> = Vec::new();
         let mut banks_changed: Vec<i64> = Vec::new();
         let mut unchanged_banks: Vec<(i64, BankReading)> = Vec::new();
+        // Each account with a live lane this pass, and the pool keys that
+        // answered live: the evidence `pool_gone` needs.
+        let mut answered: Vec<(i64, Vec<String>)> = Vec::new();
         for o in obs {
             let key = key_of(&tx, o)?;
             if o.has_stable_id() && meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
@@ -581,6 +584,15 @@ impl History {
             let spacexsi_account = spacexsi_key(&tx, o, &key)?;
             let sx = o.spacexsi.map(super::spacexsi_name);
             write_lanes(&tx, account, &o.lanes, sx, seen, t.watch_gap_secs, &mut refold)?;
+            let live: Vec<String> = o
+                .lanes
+                .iter()
+                .filter(|l| !l.stale && !l.projected && l.fetched_at > 0.0 && !l.pool_key.is_empty())
+                .map(|l| l.pool_key.clone())
+                .collect();
+            if !live.is_empty() {
+                answered.push((account, live));
+            }
             // On the unified plan the lanes are kept twice (§3.4): under the
             // vendor, and under SpaceXSI, where its cycles are derived.
             let copy = spacexsi_account.as_ref().map(|_| o.for_spacexsi());
@@ -636,6 +648,16 @@ impl History {
         for (account, at) in account_refold {
             for pool in pools_of(&tx, account)? {
                 refold.push((pool, at));
+            }
+        }
+        // A pool missing from this pass while its siblings answered live
+        // may have been gone a whole window by now (§4): folded again, so
+        // its open cycle closes as `pool_gone`.
+        for (account, present) in answered {
+            for (pool, last) in gone_candidates(&tx, account, &present)? {
+                if gone_at(&tx, pool, t)?.is_some() {
+                    refold.push((pool, last));
+                }
             }
         }
         // An included pool folded again moves what its overage pools'
@@ -1437,6 +1459,92 @@ fn load_cycles_from(conn: &Connection, pool: i64, from: i64) -> Result<Vec<(i64,
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
+/// The included pools of `account` with an open cycle that did not answer
+/// live this pass (`present` is the keys that did), and whose last
+/// observation is at least a window old: each with that observation.
+fn gone_candidates(tx: &Transaction, account: i64, present: &[String]) -> Result<Vec<(i64, f64)>, String> {
+    let mut st = tx
+        .prepare(
+            "SELECT p.id, p.pool_key, c.last_obs_at, c.window_secs FROM pool p JOIN cycle c ON c.pool_id = p.id
+              WHERE p.account_id = ?1 AND p.role = 'included' AND c.closed_at IS NULL
+                AND c.window_secs > 0 AND c.last_obs_at IS NOT NULL",
+        )
+        .map_err(sql)?;
+    let rows = st
+        .query_map([account], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?, r.get::<_, f64>(3)?)))
+        .map_err(sql)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (pool, key, last, _) = row.map_err(sql)?;
+        if !present.contains(&key) {
+            out.push((pool, last));
+        }
+    }
+    Ok(out)
+}
+
+/// When `pool`'s open cycle closes as `pool_gone` (§4), if it does: the
+/// pool missing from live readings for a whole window - its cycle's - while
+/// a sibling included pool of the same account went on answering live, with
+/// no gap in the siblings' live readings longer than [`fold::COVERAGE_GAP`]
+/// from the pool's last live reading to a window after it. So a pane that
+/// was asleep, fetches that failed, or readings that were only cached never
+/// make one: none of them leaves live sibling readings through the window.
+/// A pool last read at about zero is idle, not gone - Claude leaves an
+/// unused limit out of its reading - and an undated pool has no window to
+/// be missing for. It closes at its stated end where that comes first,
+/// else a window after its last live reading. Worked out from the stored
+/// readings alone, so a full re-fold reaches the same answer - and a pool
+/// that answers live again is judged again with that reading, so its cycle
+/// then closes as the fold reads the readings either side, on schedule.
+fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, String> {
+    // From the samples only, never from the cycles this fold is about to
+    // replace: the pool's last live reading, its window and stated end.
+    let (account, role): (i64, String) = tx
+        .query_row("SELECT account_id, role FROM pool WHERE id = ?1", [pool], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(sql)?;
+    if Role::from_name(&role) != Role::Included {
+        return Ok(None);
+    }
+    let last: Option<(f64, Option<f64>, Option<f64>, Option<f64>)> = tx
+        .query_row(
+            "SELECT at, pct, window_secs, reset_at FROM sample WHERE pool_id = ?1 AND source != 'cached'
+              ORDER BY at DESC LIMIT 1",
+            [pool],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some((last, pct, window, ends_at)) = last else {
+        return Ok(None);
+    };
+    let Some(window) = window.filter(|w| *w > 0.0) else {
+        return Ok(None);
+    };
+    if pct.is_none_or(|p| p <= t.near_zero_pct) {
+        return Ok(None);
+    }
+    let until = last + window;
+    // The siblings' live readings from the last one through a window after
+    // it, as the largest gap between them and the latest of them.
+    let (gap, latest): (Option<f64>, Option<f64>) = tx
+        .query_row(
+            "SELECT MAX(gap), MAX(at) FROM (
+                SELECT at, at - LAG(at, 1, ?2) OVER (ORDER BY at) AS gap FROM (
+                    SELECT DISTINCT s.at FROM sample s JOIN pool p ON p.id = s.pool_id
+                     WHERE p.account_id = ?1 AND p.id != ?3 AND p.role = 'included' AND s.source != 'cached'
+                       AND s.at > ?2 AND s.at <= ?4))",
+            params![account, last, pool, until + fold::COVERAGE_GAP],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(sql)?;
+    let watched = matches!((gap, latest), (Some(g), Some(l)) if g <= fold::COVERAGE_GAP && l >= until);
+    if !watched {
+        return Ok(None);
+    }
+    Ok(Some(ends_at.filter(|e| *e > last && *e < until).unwrap_or(until)))
+}
+
 /// The pool's latest cycle, when it is undated and still open and nothing
 /// after its last observation states an instant, as a [`fold::Resume`] to
 /// fold on from: what an append to it needs, without its earlier readings.
@@ -1682,6 +1790,8 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         (None, Role::Balance) => s_prev,
         (None, _) => seed.as_ref().map(|s| s.at),
     };
+    // Before the open cycle is deleted below: it is what this reads.
+    let gone_close = gone_at(tx, pool, t)?;
     let gone = "SELECT id FROM cycle WHERE pool_id = ?1 AND ordinal > ?2";
     tx.execute(
         &format!("DELETE FROM segment WHERE cycle_id IN ({gone})"),
@@ -1766,7 +1876,7 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         next_ordinal: keep_ordinal as u32 + 1,
         rolling_seed: seed.as_ref(),
         resume: resume.as_ref(),
-        gone_at: None,
+        gone_at: gone_close,
         thresholds: *t,
     });
     let mut ids: Vec<(i64, &Cycle)> = Vec::new();
@@ -2198,6 +2308,102 @@ mod tests {
         SAMPLES_READ.with(|n| n.set(0));
         h.record(&[o], &Thresholds::default(), at).unwrap();
         SAMPLES_READ.with(|n| n.get())
+    }
+
+    /// A pass of two pools of one account: `a` (five-hour) only when given.
+    fn two_pools(at: f64, a: Option<(f64, f64)>, b_pct: f64, b_stale: bool) -> Observation {
+        let w = 5.0 * H;
+        let mut lanes = Vec::new();
+        if let Some((pct, end)) = a {
+            lanes.push(lane("primary_window", pct, at, end, w));
+        }
+        let mut b = lane("secondary_window", b_pct, at, 2_000_000.0 + WEEK, WEEK);
+        b.stale = b_stale;
+        lanes.push(b);
+        obs(lanes)
+    }
+
+    #[test]
+    fn a_pool_missing_from_live_readings_for_a_window_while_its_siblings_answer_is_gone() {
+        // Spec §4: the five-hour pool stops appearing while the weekly pool
+        // of the same account goes on answering live, for longer than a
+        // whole five-hour window. Its open cycle closes as `pool_gone`.
+        let p = temp("pool-gone");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let key = obs(vec![]).account_key();
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c.len(), 1, "{c:#?}");
+        assert_eq!(c[0].end_reason, Some(EndReason::PoolGone));
+        assert_eq!(c[0].closed_at, Some(end), "closed no later than its own stated end");
+        // A full fold from the samples says the same.
+        let (stored, full) = stored_then_full(&mut h, "primary_window");
+        assert_eq!(stored, full);
+        // Back again: the absence is judged again with the new reading, as
+        // every derived row is (§3.5) - the pool was not gone after all, so
+        // the cycle ended on schedule - and a new cycle opens.
+        let back = a + 7.0 * H;
+        h.record(&[two_pools(back, Some((5.0, back + 4.0 * H)), 20.0, false)], &t, back).unwrap();
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c[0].end_reason, Some(EndReason::Scheduled));
+        assert_eq!(c[0].closed_at, Some(end));
+        assert!(c.last().unwrap().closed_at.is_none());
+    }
+
+    #[test]
+    fn absence_while_idle_failing_or_cached_is_never_pool_gone() {
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        let key = obs(vec![]).account_key();
+        let gone = |h: &History| {
+            h.cycles("codex", &key, "primary_window")
+                .unwrap()
+                .iter()
+                .any(|c| c.end_reason == Some(EndReason::PoolGone))
+        };
+        // Nothing read at all for six hours - asleep, or every fetch failed -
+        // then both pools back: the gap is the pane's, not the pool's.
+        let mut h = History::open(&temp("gone-idle")).unwrap();
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        h.record(&[two_pools(a + 6.0 * H, None, 12.0, false)], &t, a + 6.0 * H).unwrap();
+        assert!(!gone(&h));
+        // Only cached sibling readings through the gap: no live evidence.
+        let mut h = History::open(&temp("gone-cached")).unwrap();
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, true)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        assert!(!gone(&h));
+        // A limit last read at about zero is idle - Claude leaves an unused
+        // limit out - and its absence is no sign it is gone.
+        let mut h = History::open(&temp("gone-zero")).unwrap();
+        h.record(&[two_pools(a, Some((0.0, end)), 10.0, false)], &t, a).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        assert!(!gone(&h));
+        // Siblings live for less than a window: not yet.
+        let mut h = History::open(&temp("gone-short")).unwrap();
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 4.5 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        assert!(!gone(&h));
     }
 
     #[test]

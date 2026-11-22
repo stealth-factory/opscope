@@ -211,8 +211,9 @@ pub enum EndReason {
     WindowChanged,
     PlanChanged,
     LimitChanged,
-    /// Reserved: the pool missing from live readings for a whole window
-    /// while its siblings are present (§4). Not produced in phase 1.
+    /// The pool missing from live readings for a whole window while its
+    /// siblings answered live (§4): worked out by the store from the
+    /// readings ([`FoldInput::gone_at`]) and applied to the open cycle.
     PoolGone,
 }
 
