@@ -1757,7 +1757,23 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         // The last sample already folded opens the first delta.
         let mut own: Vec<Sample> = before.iter().cloned().collect();
         own.extend(samples.iter().cloned());
-        for span in overage::spans(role, &own, &included, t) {
+        // A balance's grant expiries stated by readings before these and
+        // still ahead of them: a fall across one is expiry, as the full
+        // replay has it, whichever reading stated it.
+        let stated: Vec<f64> = match (role, own.first()) {
+            (Role::Balance, Some(first)) => {
+                let mut st = tx
+                    .prepare(
+                        "SELECT DISTINCT reset_at FROM sample
+                          WHERE pool_id = ?1 AND at < ?2 AND reset_at IS NOT NULL AND reset_at > ?2",
+                    )
+                    .map_err(sql)?;
+                let rows = st.query_map(params![pool, first.at], |r| r.get::<_, f64>(0)).map_err(sql)?;
+                rows.collect::<Result<_, _>>().map_err(sql)?
+            }
+            _ => Vec::new(),
+        };
+        for span in overage::spans_with(role, &own, &included, t, &stated) {
             let exhausted = serde_json::to_string(&span.exhausted).unwrap_or_else(|_| "[]".into());
             tx.execute(
                 "INSERT OR REPLACE INTO overage_span(overage_id, at_lo, at_hi, amount, exhausted) VALUES (?1, ?2, ?3, ?4, ?5)",

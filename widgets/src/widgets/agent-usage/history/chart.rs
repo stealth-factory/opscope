@@ -331,24 +331,27 @@ impl History {
             })
             .collect();
         place_resets(&mut bars, resets);
-        if linked {
-            for i in 0..bars.len() {
-                // A span is attributed only while the pool was exhausted, so
-                // only a cycle that was, or the one after it (a span across
-                // the boundary), can hold one.
-                let exhausted = |j: usize| bars[j].cycle.exhausted_at.is_some();
-                if !(exhausted(i) || (i > 0 && exhausted(i - 1))) {
-                    continue;
-                }
-                let spans = self.spend_in_cycle(provider, account_key, &row.key, &bars[i].cycle)?;
-                bars[i].over = spans
-                    .into_iter()
+        if linked && !bars.is_empty() {
+            // One read for the whole displayed range, then each cycle takes
+            // every span its time overlaps - however many cycles a long
+            // bracket crosses, and whether or not the cycle itself or the
+            // one before it reached 100% - the same rule `spend_in_cycle`
+            // reads. A span keeps one key in every bar, so it is counted once.
+            let bound = |c: &Cycle| c.closed_at.or(c.ends_at).unwrap_or(f64::INFINITY);
+            let lo = bars[0].cycle.starts_at;
+            let hi = bars.iter().map(|b| bound(&b.cycle)).fold(f64::NEG_INFINITY, f64::max);
+            let spans = self.spend_overlapping(provider, account_key, &row.key, lo, hi)?;
+            for bar in &mut bars {
+                let (start, end) = (bar.cycle.starts_at, bound(&bar.cycle));
+                bar.over = spans
+                    .iter()
+                    .filter(|s| s.span.at_hi > start && s.span.at_lo < end)
                     .map(|s| Over {
-                        key: (s.overage_pool_key, s.span.at_hi.to_bits()),
-                        unit: s.unit,
-                        currency: s.currency,
+                        key: (s.overage_pool_key.clone(), s.span.at_hi.to_bits()),
+                        unit: s.unit.clone(),
+                        currency: s.currency.clone(),
                         amount: s.span.amount,
-                        spans_reset: s.spans_reset,
+                        spans_reset: s.span.at_lo < start || s.span.at_hi > end,
                     })
                     .collect();
             }

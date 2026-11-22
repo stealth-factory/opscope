@@ -208,11 +208,23 @@ fn exhausted_during(included: &[Included], lo: f64, hi: f64) -> Vec<i64> {
 /// shows was spent between the boundary (or the reading before, if later)
 /// and the reading that showed it.
 pub fn spans(role: Role, samples: &[Sample], included: &[Included], t: &Thresholds) -> Vec<Span> {
+    spans_with(role, samples, included, t, &[])
+}
+
+/// [`spans`], with the grant expiries readings before `samples` stated
+/// (`stated`) - a balance's fall across one is expiry whichever reading
+/// said so, exactly as the full replay ([`read`]'s `balance_months`) reads
+/// it, so an incremental write and a full one cannot disagree about one move.
+pub fn spans_with(role: Role, samples: &[Sample], included: &[Included], t: &Thresholds, stated: &[f64]) -> Vec<Span> {
     let mut out = Vec::new();
     match role {
         Role::Included => {}
         Role::Balance => {
-            for m in balance_moves(samples, &expiries(samples)) {
+            let mut known = expiries(samples);
+            known.extend_from_slice(stated);
+            known.sort_by(f64::total_cmp);
+            known.dedup();
+            for m in balance_moves(samples, &known) {
                 if m.kind == MoveKind::Spend {
                     out.push(Span {
                         exhausted: exhausted_during(included, m.at_lo, m.at_hi),
@@ -423,10 +435,10 @@ pub fn links_of(obs: &Observation) -> Vec<(String, String)> {
         .collect();
     let mut out = Vec::new();
     for over in obs.lanes.iter().filter(keyed).filter(|l| l.role != PoolRole::Included) {
-        let own = over
-            .pool_key
-            .strip_suffix(":overage")
-            .filter(|k| included.contains(k));
+        // One allowance's own overage serves that allowance only, and only
+        // once it is in the reading: a pass that left it out links nothing,
+        // rather than treating the overage as account-wide.
+        let own = over.pool_key.strip_suffix(":overage");
         for inc in &included {
             if own.is_none_or(|k| k == *inc) && !out.iter().any(|(o, i)| o == &over.pool_key && i == inc) {
                 out.push((over.pool_key.clone(), inc.to_string()));
@@ -673,12 +685,22 @@ pub mod read {
         }
 
         fn spans_of(&self, overage_id: i64) -> Result<Vec<Span>, String> {
+            self.spans_between(overage_id, f64::NEG_INFINITY, f64::INFINITY)
+        }
+
+        /// The spans whose bracket overlaps `start..end`, each whole, oldest
+        /// first: filtered by the query, so a long history's old spans are
+        /// never loaded and decoded for a recent cycle.
+        fn spans_between(&self, overage_id: i64, start: f64, end: f64) -> Result<Vec<Span>, String> {
             let mut st = self
                 .conn
-                .prepare("SELECT at_lo, at_hi, amount, exhausted FROM overage_span WHERE overage_id = ?1 ORDER BY at_hi")
+                .prepare(
+                    "SELECT at_lo, at_hi, amount, exhausted FROM overage_span
+                      WHERE overage_id = ?1 AND at_hi > ?2 AND at_lo < ?3 ORDER BY at_hi",
+                )
                 .map_err(sql)?;
             let rows = st
-                .query_map([overage_id], |r| {
+                .query_map(params![overage_id, start, end], |r| {
                     let exhausted: String = r.get(3)?;
                     Ok(Span {
                         at_lo: r.get(0)?,
@@ -706,11 +728,27 @@ pub mod read {
             included_pool_key: &str,
             cycle: &Cycle,
         ) -> Result<Vec<AttributedSpan>, String> {
+            let start = cycle.starts_at;
+            let end = cycle.closed_at.or(cycle.ends_at).unwrap_or(f64::INFINITY);
+            self.spend_overlapping(provider, account_key, included_pool_key, start, end)
+        }
+
+        /// [`History::spend_in_cycle`] for any stretch `start..end`: every
+        /// span drawn while `included_pool_key` was exhausted whose bracket
+        /// overlaps it, whole, with `spans_reset` set when it reaches past
+        /// either end. The charts read a whole displayed range with one call
+        /// and hand each cycle the spans that overlap it.
+        pub fn spend_overlapping(
+            &self,
+            provider: &str,
+            account_key: &str,
+            included_pool_key: &str,
+            start: f64,
+            end: f64,
+        ) -> Result<Vec<AttributedSpan>, String> {
             let Some(inc) = self.overage_pool(provider, account_key, included_pool_key)? else {
                 return Ok(Vec::new());
             };
-            let start = cycle.starts_at;
-            let end = cycle.closed_at.or(cycle.ends_at).unwrap_or(f64::INFINITY);
             let overs: Vec<(i64, String, String, Option<String>)> = {
                 let mut st = self
                     .conn
@@ -726,8 +764,8 @@ pub mod read {
             };
             let mut out = Vec::new();
             for (id, key, unit, currency) in overs {
-                for span in self.spans_of(id)? {
-                    if !span.exhausted.contains(&inc) || span.at_hi <= start || span.at_lo >= end {
+                for span in self.spans_between(id, start, end)? {
+                    if !span.exhausted.contains(&inc) {
                         continue;
                     }
                     out.push(AttributedSpan {
@@ -1276,6 +1314,98 @@ mod tests {
         assert_eq!(own[0].cycle.start_source, StartSource::Inferred);
         assert_eq!(h.count("overage_span"), 1);
         assert_eq!(h.count("pool_link"), 1);
+    }
+
+    #[test]
+    fn an_allowances_own_overage_is_never_linked_to_another_allowance() {
+        // CodeRabbit's case: Copilot reports `premium_interactions:overage`
+        // and `chat`, and omits `premium_interactions` this pass. The
+        // overage is that allowance's own; it is not account-wide, and it
+        // waits for its own allowance rather than landing on chat.
+        let lane = |key: &str, role: PoolRole| Lane {
+            pool_key: key.into(),
+            role,
+            ..Lane::default()
+        };
+        let mut copilot = Observation {
+            provider: "copilot".into(),
+            lanes: vec![lane("chat", PoolRole::Included), lane("premium_interactions:overage", PoolRole::Overage)],
+            ..Observation::default()
+        };
+        assert!(links_of(&copilot).is_empty(), "{:?}", links_of(&copilot));
+        copilot.lanes.push(lane("premium_interactions", PoolRole::Included));
+        assert_eq!(
+            links_of(&copilot),
+            vec![("premium_interactions:overage".to_string(), "premium_interactions".to_string())]
+        );
+    }
+
+    fn credits(left: f64, at: f64, expiry: Option<f64>) -> Lane {
+        Lane {
+            label: "credits".into(),
+            pct: f64::NAN,
+            pool_key: "credits".into(),
+            unit: Unit::Credits,
+            role: PoolRole::Balance,
+            limit: Some(left),
+            reset: expiry,
+            fetched_at: at,
+            ..Lane::default()
+        }
+    }
+
+    #[test]
+    fn a_fall_across_an_expiry_stated_before_the_refold_point_is_expiry_not_spend() {
+        // CodeRabbit's case: the expiry is stated by a reading before the
+        // one an incremental write folds on from, and that one omits it. The
+        // write saw only its own window's expiries and booked the fall as
+        // spend; the full replay calls it expiry.
+        let p = temp("expiry");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let expiry = a + 3.0 * H;
+        let codex = |lane: Lane| Observation {
+            provider: "codex".into(),
+            account_id: "acct-expiry".into(),
+            tab: "codex".into(),
+            lanes: vec![lane],
+            ..Observation::default()
+        };
+        h.record(&[codex(credits(100.0, a, Some(expiry)))], &t(), a).unwrap();
+        h.record(&[codex(credits(100.0, a + 2.0 * H, None))], &t(), a + 2.0 * H).unwrap();
+        h.record(&[codex(credits(80.0, a + 4.0 * H, None))], &t(), a + 4.0 * H).unwrap();
+        assert_eq!(h.count("overage_span"), 0, "the fall crossed a stated expiry");
+        let key = codex(credits(0.0, 0.0, None)).account_key();
+        let months = h.balance_months("codex", &key, "credits").unwrap();
+        assert_eq!(months.iter().map(|m| m.spent).sum::<f64>(), 0.0);
+        assert_eq!(months.iter().map(|m| m.expired).sum::<f64>(), 20.0);
+    }
+
+    #[test]
+    fn a_long_span_is_shown_on_every_cycle_it_overlaps_in_the_chart() {
+        // CodeRabbit's case: the week was exhausted, then nothing was read
+        // for two weeks while extra usage was spent. The span overlaps the
+        // exhausted week, an unseen week and the current one; the chart
+        // skipped the current one because neither it nor the week before it
+        // reached 100%.
+        let p = temp("chart-overlap");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let end = a + 2.0 * H;
+        h.record(&[claude(vec![weekly(100.0, a, end), extra(10.0, a)])], &t(), a).unwrap();
+        let b = end + WEEK + 2.0 * DAY;
+        h.record(&[claude(vec![weekly(5.0, b, end + 2.0 * WEEK), extra(14.0, b)])], &t(), b)
+            .unwrap();
+        let pass = [claude(vec![weekly(5.0, b, end + 2.0 * WEEK), extra(14.0, b)])];
+        let got = crate::history::chart::gather(&h, &pass, &t()).unwrap();
+        let pool = got["claude"].pools.iter().find(|p| p.label == "overall 7d").unwrap();
+        let crate::history::chart::Body::Cycles(bars) = &pool.body else { panic!("{:?}", pool.body) };
+        assert_eq!(bars.len(), 3, "{bars:#?}");
+        for bar in bars {
+            assert_eq!(bar.over.len(), 1, "{:?}", bar.cycle);
+            assert!(bar.over[0].spans_reset);
+            assert!((bar.over[0].amount - 4.0).abs() < 1e-9);
+        }
     }
 
     #[test]
