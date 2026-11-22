@@ -1049,6 +1049,9 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
     // The last figure that can mark a boundary: a cached one never does
     // (§4), so a cached zero between two live readings is no fall.
     let mut last_pct: Option<f64> = input.prev.and_then(|p| p.peak_pct);
+    // The same for a figure stated only as an amount - spend with no cap,
+    // so no percentage - which rolls when it falls back to nothing.
+    let mut last_used: Option<f64> = input.prev.and_then(|p| p.used_amount);
     let mut prev_at: Option<f64> = None;
     for s in input.samples {
         // A reset established at this sample (phase 2): only a bank fall or
@@ -1071,7 +1074,10 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
         let refilled = ev.is_some_and(|e| e.effect == CycleEffect::KeptBoundary);
         let fell = s.source != Source::Cached
             && !refilled
-            && matches!((last_pct, s.pct), (Some(a), Some(b)) if a > near && b <= near);
+            && match (last_pct, s.pct) {
+                (Some(a), Some(b)) => a > near && b <= near,
+                _ => matches!((last_used, s.used, s.pct), (Some(a), Some(b), None) if a > 1e-9 && b <= 1e-9),
+            };
         let limit_changed =
             matches!((cur.as_ref(), prev_at), (Some(b), Some(_)) if differs(b.cycle.limit_amount, s.limit, 1e-9));
         // A change of plan between readings closes the cycle where it was
@@ -1114,6 +1120,9 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
         }
         if s.pct.is_some() && s.source != Source::Cached {
             last_pct = s.pct;
+        }
+        if s.used.is_some() && s.source != Source::Cached {
+            last_used = s.used;
         }
         prev_at = Some(s.at);
     }
@@ -1778,6 +1787,23 @@ mod tests {
         assert_eq!(out.cycles[0].consumed_pct, Some(70.0));
         // The same fall with no event is the undated pool's own boundary.
         assert_eq!(run(&samples).cycles.len(), 2);
+    }
+
+    #[test]
+    fn spend_with_no_percentage_rolls_when_the_amount_falls_back_to_zero() {
+        // Claude's extra usage with no cap states money and no percentage:
+        // its month rolls when the spend falls back to nothing.
+        let a = 1_000_000.0;
+        let money = |at: f64, used: f64| Sample {
+            pct: None,
+            used: Some(used),
+            ..s(at, 0.0, None, None)
+        };
+        let samples = vec![money(a, 10.0), money(a + H, 14.0), money(a + 2.0 * H, 0.0), money(a + 3.0 * H, 2.0)];
+        let out = run_with(&samples, &[], &[], Role::Overage);
+        assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].used_amount, Some(14.0));
+        assert_eq!(out.cycles[1].starts_at, a + 2.0 * H);
     }
 
     #[test]

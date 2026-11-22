@@ -466,8 +466,16 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
     if present("claude") {
         let multi = s.claude.len() > 1;
         for d in &s.claude {
-            let tab = if d.label.is_empty() { "claude".to_string() } else { format!("claude:{}", d.label) };
-            let lanes = crate::claude::lanes(d);
+            // The tab strip's own rule: a lone profile is the bare `claude`
+            // tab whatever its label, so its history is found there.
+            let tab = if multi && !d.label.is_empty() {
+                format!("claude:{}", d.label)
+            } else {
+                "claude".to_string()
+            };
+            let mut lanes = crate::claude::lanes(d);
+            // Spend with no cap, which the summary draws no bar for.
+            lanes.extend(crate::claude::history_lanes(d));
             let facts = crate::claude::history_facts(d);
             if asked(&facts, &lanes) {
                 let heading = crate::claude::summary_heading(&d.label, multi);
@@ -528,7 +536,12 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         let mut o = build(name, vendor_tab(name, place), spacexsi_heading(name, place), String::new(), lanes, facts);
         o.spacexsi = Some(place);
         if name == "cursor" {
-            cursor_key = Some(o.account_key());
+            // Only Cursor's own id keys the shared plan: without one this
+            // pass the key would be `profile:default`, so it is left unset
+            // and the store keeps the key the two vendors last shared.
+            if o.has_stable_id() {
+                cursor_key = Some(o.account_key());
+            }
             o.charges = crate::cursor::history_charges(&s.cursor);
         }
         o.spacexsi_account = match place {
@@ -1274,6 +1287,45 @@ mod tests {
         // Alone, it is the plan's only vendor and keys it itself.
         s.grok.spacexsi = Spacexsi::Alone;
         assert!(observations(&s, now())[0].spacexsi_account.is_some());
+    }
+
+    #[test]
+    fn a_lone_claude_profile_with_a_label_publishes_its_history_under_the_bare_tab() {
+        // CodeRabbit's case: a single custom profile is drawn on the bare
+        // `claude` tab, and its history was published under `claude:work`,
+        // where that tab never looks.
+        let s = State {
+            claude: vec![crate::claude::Data::with_session_quota("work", 70)],
+            installed: present(&["claude"]),
+            ..State::default()
+        };
+        let obs = observations(&s, now());
+        assert_eq!(obs.len(), 1);
+        assert_eq!(obs[0].tab, "claude");
+        assert_eq!(obs[0].profile, "work", "the profile still keys an id-less account");
+    }
+
+    #[test]
+    fn a_cursor_pass_with_no_account_id_leaves_the_shared_plan_key_unset() {
+        // CodeRabbit's case: Cursor's id missing this pass made its key
+        // `profile:default`, and Grok carried it as the shared plan's key,
+        // splitting the plan's history. Without Cursor's own id, neither
+        // names a key and the store keeps the one the two last shared.
+        let mut s = State {
+            cursor: crate::cursor::Data::unified_fixture(true),
+            grok: crate::grok::Data::unified_fixture(),
+            installed: present(&["cursor", "grok"]),
+            ..State::default()
+        };
+        s.cursor.spacexsi = Spacexsi::Shared;
+        s.grok.spacexsi = Spacexsi::Shared;
+        s.cursor.account_id = String::new();
+        let obs = observations(&s, now());
+        assert_eq!(obs.len(), 2);
+        assert!(obs.iter().all(|o| o.spacexsi_account.is_none()), "{:?}", obs.iter().map(|o| &o.spacexsi_account).collect::<Vec<_>>());
+        s.cursor.account_id = "user_1".into();
+        let obs = observations(&s, now());
+        assert!(obs.iter().all(|o| o.spacexsi_account.is_some()));
     }
 
     #[test]

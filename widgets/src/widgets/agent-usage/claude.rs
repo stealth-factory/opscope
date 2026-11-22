@@ -2753,6 +2753,36 @@ pub fn lanes(c: &Data) -> Vec<Lane> {
     out
 }
 
+/// Lanes the history records that the summary draws no bar for: extra
+/// usage with no ceiling - unlimited, or switched off with spend still on
+/// it. Billable money all the same, so its history is kept, in money, under
+/// the same pool as a capped month (`extra_usage`), with no limit and no
+/// percentage: a percentage of nothing is not a reading.
+pub fn history_lanes(c: &Data) -> Vec<Lane> {
+    let Some(u) = c.quota.as_ref() else {
+        return Vec::new();
+    };
+    let (used, currency, places) = match extra_state(u) {
+        Extra::Unlimited { used, currency, places } | Extra::Off { used, currency, places, .. } => (used, currency, places),
+        _ => return Vec::new(),
+    };
+    vec![Lane {
+        pool_key: "extra_usage".into(),
+        unit: Unit::Money { currency, exponent: places as i32 },
+        role: PoolRole::Overage,
+        used: Some(used),
+        limit: None,
+        fetched_at: c.quota_at,
+        label: "extra".into(),
+        pct: f64::NAN,
+        window_secs: None,
+        reset: None,
+        stale: reading_is_old(c.quota_at),
+        projected: false,
+        apart: true,
+    }]
+}
+
 /// The whole tab: the quota, what the machine recorded, what it cost, and
 /// which subscription the percentages are percentages of.
 pub fn tab_with_plots(c: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
@@ -5128,6 +5158,40 @@ mod tests {
             assert!(lanes(&data).iter().all(|lane| !lane.label.contains("5h")));
             assert!(why_no_lane(&data).is_empty(), "{plan}");
         }
+    }
+
+    #[test]
+    fn spend_with_no_cap_is_kept_by_the_history_in_money() {
+        // CodeRabbit's case: unlimited or switched-off extra usage still
+        // carries billable spend; the summary draws no lane for it, and the
+        // history lost it with the lane.
+        let spend = |enabled: bool| {
+            serde_json::json!({
+                "limits": [],
+                "spend": {
+                    "enabled": enabled,
+                    "severity": "normal",
+                    "used": {"amount_minor": 250, "currency": "USD", "exponent": 2}
+                }
+            })
+        };
+        for enabled in [true, false] {
+            let mut data = Data::with_plan_quota("max", "default_claude_max_20x", spend(enabled));
+            data.quota_at = 1_000.0;
+            assert!(lanes(&data).is_empty(), "the summary still draws no bar");
+            let got = history_lanes(&data);
+            assert_eq!(got.len(), 1, "enabled {enabled}");
+            assert_eq!(got[0].pool_key, "extra_usage");
+            assert_eq!(got[0].role, PoolRole::Overage);
+            assert_eq!(got[0].used, Some(2.5));
+            assert_eq!(got[0].limit, None);
+            assert!(got[0].pct.is_nan());
+            assert_eq!(got[0].fetched_at, 1_000.0);
+        }
+        // A capped month is the summary's own lane; nothing is added.
+        let mut capped = Data::with_plan_quota("max", "default_claude_max_20x", measured());
+        capped.quota_at = 1_000.0;
+        assert!(history_lanes(&capped).is_empty());
     }
 
     #[test]
