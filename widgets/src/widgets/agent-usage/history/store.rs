@@ -1359,11 +1359,14 @@ fn load_cycles_from(conn: &Connection, pool: i64, from: i64) -> Result<Vec<(i64,
             "SELECT id, ordinal, starts_at, ends_at, closed_at, window_secs, cycle_model, start_source, end_reason,
                     plan, peak_pct, consumed_pct, allowances, available_pct, end_is_lower_bound, used_amount,
                     limit_amount, exhausted_at, first_obs_at, last_obs_at, coverage,
-                    -- Derived, not a column (§5.7): a reset that began in this
-                    -- cycle with no known figure before it.
+                    -- Derived, not a column (§5.7): a reset filed under this
+                    -- cycle with no known figure before it - or, filed under
+                    -- none, one that began inside it.
                     EXISTS (SELECT 1 FROM reset_event e
-                             WHERE e.pool_id = cycle.pool_id AND e.at_lo >= cycle.starts_at
-                               AND (cycle.closed_at IS NULL OR e.at_lo < cycle.closed_at)
+                             WHERE e.pool_id = cycle.pool_id
+                               AND (e.cycle_id = cycle.id
+                                    OR (e.cycle_id IS NULL AND e.at_lo >= cycle.starts_at
+                                        AND (cycle.closed_at IS NULL OR e.at_lo < cycle.closed_at)))
                                AND json_extract(e.evidence, '$.before_known') = 0)
                FROM cycle WHERE pool_id = ?1 AND ordinal >= ?2 ORDER BY ordinal",
         )
@@ -1540,9 +1543,21 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         None => None,
     };
     // A dated pool folded before with no cycle at all has only ever been
-    // rolling: every reading so far is in its rolling stretch.
+    // rolling: every reading so far is in its rolling stretch. Only for an
+    // append - a reading that lands inside the stretch can break it there,
+    // and then the readings before it are not the stretch's after all.
+    let appended: bool = match from {
+        Some(from) => !tx
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM sample WHERE pool_id = ?1 AND at > ?2)",
+                params![pool, from],
+                |r| r.get::<_, bool>(0),
+            )
+            .map_err(sql)?,
+        None => false,
+    };
     let seed: Option<Sample> = at_prev
-        .filter(|s| prev.is_none() && !any_cycle && role != Role::Balance && s.reset_at.is_some());
+        .filter(|s| appended && prev.is_none() && !any_cycle && role != Role::Balance && s.reset_at.is_some());
     let after = match (&prev, role) {
         (Some(c), _) => c.last_obs_at,
         // A balance's moves are between consecutive readings: the one
@@ -1592,6 +1607,26 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
     };
     let plans = load_plans(tx, account)?;
     let banks = load_banks(tx, account)?;
+    // Spent credits already given to a reset this fold keeps: never handed
+    // to a pair of this fold as well.
+    let claimed: Vec<(f64, f64)> = {
+        let mut st = tx
+            .prepare(
+                "SELECT json_extract(evidence, '$.bank.at_lo'), json_extract(evidence, '$.bank.at_hi') FROM reset_event
+                  WHERE pool_id = ?1 AND at_hi <= ?2 AND json_extract(evidence, '$.bank') IS NOT NULL",
+            )
+            .map_err(sql)?;
+        let rows = st
+            .query_map(params![pool, floor], |r| Ok((r.get::<_, Option<f64>>(0)?, r.get::<_, Option<f64>>(1)?)))
+            .map_err(sql)?;
+        let mut out = Vec::new();
+        for row in rows {
+            if let (Some(lo), Some(hi)) = row.map_err(sql)? {
+                out.push((lo, hi));
+            }
+        }
+        out
+    };
     // Phase 2's seam: the resets in these samples.
     let found = resets::detect(&resets::DetectInput {
         // A rolling seed is never compared with what follows it.
@@ -1603,6 +1638,7 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         role,
         effect_override: t.reset_effect.get(&provider).map(resets::EffectOverride::name),
         rolling_seed: seed.as_ref(),
+        claimed: &claimed,
     });
     let out = fold::fold(&FoldInput {
         role,
@@ -1619,15 +1655,16 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
         ids.push((insert_cycle(tx, pool, c)?, c));
     }
     for e in &found {
-        // The cycle it happened in: the one its earlier reading belongs to,
-        // which a restarted reset closed (§3.6) - the kept one when that
-        // reading is the kept cycle's last.
-        let cycle = ids
+        // The cycle it happened in: the one that observed its earlier
+        // reading, which a restarted reset closed (§3.6) - even when the new
+        // cycle was clamped to start at that very reading - and the kept one
+        // when that reading is the kept cycle's last.
+        let owned = ids
             .iter()
-            .rev()
-            .find(|(_, c)| c.starts_at <= e.at_lo)
-            .map(|(id, _)| *id)
-            .or(kept_id);
+            .find(|(_, c)| c.first_obs_at.is_some_and(|f| f <= e.at_lo) && c.last_obs_at.is_some_and(|l| l >= e.at_lo))
+            .map(|(id, _)| *id);
+        let by_start = || ids.iter().rev().find(|(_, c)| c.starts_at <= e.at_lo).map(|(id, _)| *id);
+        let cycle = owned.or(kept_id.filter(|_| prev.as_ref().and_then(|c| c.last_obs_at) == Some(e.at_lo))).or_else(by_start).or(kept_id);
         tx.execute(
             "INSERT OR IGNORE INTO reset_event(pool_id, cycle_id, at_lo, at_hi, kind, cycle_effect, signals, pct_before,
                     pct_after, reset_at_before, reset_at_after, group_id, evidence)
@@ -2186,6 +2223,7 @@ mod tests {
             role: Role::Included,
             effect_override: None,
             rolling_seed: None,
+            claimed: &[],
         });
         assert_eq!(found.len(), 1);
         let fresh = fold::fold(&FoldInput {
@@ -2325,6 +2363,133 @@ mod tests {
             })
             .unwrap();
         assert!(raw.contains("spent"), "{raw}");
+    }
+
+    /// Every stored cycle and reset of one pool, then the same after a fold
+    /// of the whole pool from its samples.
+    fn stored_then_full(h: &mut History, key: &str) -> ((Vec<Cycle>, Vec<String>), (Vec<Cycle>, Vec<String>)) {
+        let t = Thresholds::default();
+        let pool: i64 = h
+            .conn
+            .query_row("SELECT id FROM pool WHERE pool_key = ?1", [key], |r| r.get(0))
+            .unwrap();
+        let read = |h: &History| {
+            let cycles: Vec<Cycle> = load_cycles(&h.conn, pool).unwrap().into_iter().map(|(_, c)| c).collect();
+            let mut st = h
+                .conn
+                .prepare("SELECT at_lo, at_hi, kind, signals, cycle_effect FROM reset_event WHERE pool_id = ?1 ORDER BY at_hi")
+                .unwrap();
+            let resets: Vec<String> = st
+                .query_map([pool], |r| {
+                    Ok(format!(
+                        "{}-{} {} {} {}",
+                        r.get::<_, f64>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?
+                    ))
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            (cycles, resets)
+        };
+        let stored = read(h);
+        let tx = h.conn.transaction().unwrap();
+        refold_pool(&tx, pool, None, &t).unwrap();
+        tx.commit().unwrap();
+        (stored, read(h))
+    }
+
+    #[test]
+    fn a_late_fixed_reading_inside_an_established_rolling_stretch_folds_as_a_full_fold() {
+        // CodeRabbit's case: four readings established a rolling stretch, so
+        // the pool keeps no cycle and folds on from its last reading as a
+        // seed. A late fixed-window reading then lands between the first two
+        // and breaks the stretch there: a full fold keeps the first reading
+        // in a cycle, and the seeded fold left it out.
+        let p = temp("rolling-late");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let w = 6.0 * H;
+        for i in 0..4 {
+            let at = a + i as f64 * H;
+            h.record(&[obs(vec![lane("primary_window", 20.0, at, at + w, w)])], &t, at).unwrap();
+        }
+        assert!(h.cycles("codex", &obs(vec![]).account_key(), "primary_window").unwrap().is_empty());
+        // Late: fetched half an hour after the first, stating its end.
+        h.record(&[obs(vec![lane("primary_window", 25.0, a + 1800.0, a + w, w)])], &t, a + 5.0 * H)
+            .unwrap();
+        let (stored, full) = stored_then_full(&mut h, "primary_window");
+        assert_eq!(stored, full);
+        assert_eq!(full.0.len(), 1);
+        assert_eq!(full.0[0].first_obs_at, Some(a));
+    }
+
+    #[test]
+    fn a_restarted_reset_clamped_to_its_earlier_reading_belongs_to_the_cycle_it_ended() {
+        // CodeRabbit's case: the new cycle's start would fall before the
+        // earlier reading, so it is clamped to it and the new cycle starts
+        // exactly there. The reset and its lower-bound flag still belong to
+        // the cycle that observed the earlier reading - the one it ended.
+        let p = temp("clamped");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let lo = a + 24.0 * H;
+        // An hour apart (offline): 90% to 0%, and the week now starts an
+        // hour before the earlier reading.
+        h.record(&[obs(vec![lane("secondary_window", 90.0, lo, a + WEEK, WEEK)])], &t, lo).unwrap();
+        h.record(&[obs(vec![lane("secondary_window", 0.0, lo + H, lo - H + WEEK, WEEK)])], &t, lo + H)
+            .unwrap();
+        let rows = load_cycles(&h.conn, 1).unwrap();
+        assert_eq!(rows.len(), 2, "{rows:#?}");
+        assert_eq!(rows[0].1.end_reason, Some(EndReason::Reset));
+        assert_eq!(rows[1].1.starts_at, lo);
+        let owner: i64 = h.conn.query_row("SELECT cycle_id FROM reset_event", [], |r| r.get(0)).unwrap();
+        assert_eq!(owner, rows[0].0, "filed under the cycle it cut short");
+        assert!(rows[0].1.consumed_is_lower_bound, "the cut-short cycle used at least what it showed");
+        assert!(!rows[1].1.consumed_is_lower_bound);
+    }
+
+    #[test]
+    fn a_redemption_kept_with_a_retained_reset_is_never_given_to_a_later_pair() {
+        // CodeRabbit's case: one bank bracket spans a reset inside a week and
+        // the week's rollover. A full fold gives the spent credit to the
+        // reset; a later write that keeps that week must not hand the same
+        // credit to the pair across the rollover as well.
+        let p = temp("redemption");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let e = 2_000_000.0;
+        let credit = |status: &str| super::super::RawCredit {
+            id: Some("c1".into()),
+            status: status.into(),
+            expires_at: Some(9e9),
+        };
+        let pass = |h: &mut History, at: f64, pct: f64, end: f64, bank: Option<&str>| {
+            let mut o = obs(vec![lane("secondary_window", pct, at, end, WEEK)]);
+            o.bank = bank.map(|s| BankReading {
+                at,
+                left: (s == "available") as u64,
+                credits: Some(vec![credit(s)]),
+            });
+            h.record(&[o], &t, at).unwrap();
+        };
+        pass(&mut h, e - 4.0 * H, 40.0, e, Some("available"));
+        pass(&mut h, e - 3.0 * H, 50.0, e, None);
+        // Offline, 50 -> 20: a reset, and the credit is its.
+        pass(&mut h, e - 2.0 * H, 20.0, e, None);
+        pass(&mut h, e - H, 30.0, e, None);
+        pass(&mut h, e + H, 5.0, e + WEEK, None);
+        pass(&mut h, e + 2.0 * H, 8.0, e + WEEK, Some("spent"));
+        pass(&mut h, e + 3.0 * H, 10.0, e + WEEK, None);
+        let (stored, full) = stored_then_full(&mut h, "secondary_window");
+        assert_eq!(stored.1, full.1);
+        let banked = full.1.iter().filter(|r| r.contains("bank_fall")).count();
+        assert_eq!(banked, 1, "{:#?}", full.1);
     }
 
     #[test]

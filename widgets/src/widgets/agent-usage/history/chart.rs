@@ -371,7 +371,14 @@ pub fn place_resets(bars: &mut [CycleBar], resets: Vec<(Option<u32>, ResetMark)>
             bars.iter().rposition(|b| b.cycle.starts_at <= r.at_hi)
         };
         let Some(mut i) = by_ordinal.or_else(by_time) else { continue };
-        if r.restarted && i > 0 && bars[i - 1].cycle.cut_short() && !bars[i - 1].resets.iter().any(|x| x.restarted) {
+        // The store files a restarted reset under the cycle it ended; only
+        // one placed by time needs moving back.
+        if by_ordinal.is_none()
+            && r.restarted
+            && i > 0
+            && bars[i - 1].cycle.cut_short()
+            && !bars[i - 1].resets.iter().any(|x| x.restarted)
+        {
             i -= 1;
         }
         bars[i].resets.push(r);

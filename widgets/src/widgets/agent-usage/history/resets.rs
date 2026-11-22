@@ -107,6 +107,10 @@ pub struct DetectInput<'a> {
     /// As [`fold::FoldInput::rolling_seed`]: the reading before `samples`,
     /// known to be in a rolling stretch. Never compared with them.
     pub rolling_seed: Option<&'a Sample>,
+    /// The bank intervals (`at_lo`, `at_hi`) whose spent credit a reset
+    /// kept from an earlier fold already holds: never given to a pair of
+    /// this one too.
+    pub claimed: &'a [(f64, f64)],
 }
 
 /// The effect `history_reset_effect` may name for a provider.
@@ -316,7 +320,7 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     }
 
     let banks = bank_events(input.banks);
-    attribute_bank(&mut pairs, &banks, dated);
+    attribute_bank(&mut pairs, &banks, dated, input.claimed);
 
     let first = input.samples.first().map_or(f64::INFINITY, |s| s.at);
     pairs
@@ -333,9 +337,10 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
 /// Give each redeemed credit to at most one pair of this pool: the first it
 /// overlaps that shows a signal of its own, else the one holding the bank
 /// reading that first showed it gone. Never counted twice in one pool.
-fn attribute_bank(pairs: &mut [Pair], banks: &[BankEvent], dated: bool) {
+fn attribute_bank(pairs: &mut [Pair], banks: &[BankEvent], dated: bool, claimed: &[(f64, f64)]) {
+    let same = |a: f64, b: f64| (a - b).abs() <= 1e-6;
     for (i, e) in banks.iter().enumerate() {
-        if e.kind != BankEventKind::Redeemed {
+        if e.kind != BankEventKind::Redeemed || claimed.iter().any(|(lo, hi)| same(*lo, e.at_lo) && same(*hi, e.at_hi)) {
             continue;
         }
         let free = |x: &Pair| x.bank.is_none() && e.at_lo < x.n.at && x.p.at < e.at_hi && x.accepts_bank(dated);
@@ -726,6 +731,7 @@ mod tests {
             role: Role::Included,
             effect_override: None,
             rolling_seed: None,
+            claimed: &[],
         }
     }
 
