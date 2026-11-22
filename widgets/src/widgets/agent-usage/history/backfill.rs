@@ -244,7 +244,8 @@ fn limits_at(limits: &serde_json::Value, at: f64) -> Vec<Replayed> {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
     pub files: usize,
-    /// Files that could not be opened or read to the end.
+    /// Files that could not be opened or read to the end, and directories
+    /// or entries under the roots that could not be listed.
     pub unreadable: usize,
     /// `.jsonl.zst` rollouts, not read (see the module note).
     pub compressed: usize,
@@ -350,8 +351,11 @@ fn read_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> std::io:
     }
 }
 
-/// One rollout's readings for `account_id`, oldest first and thinned. A file
-/// that stops reading part-way keeps what it read before, and is counted.
+/// One rollout's readings for `account_id`, in file order and not thinned:
+/// sessions of one account run side by side, and a reading one file's
+/// thinning drops can be the one the merged readings need, so [`collect`]
+/// thins once, after merging. A file that stops reading part-way keeps what
+/// it read before, and is counted.
 fn read_rollout(path: &Path, account_id: &str, stats: &mut Stats) -> Vec<Replayed> {
     let mut scan = Scan {
         account_id,
@@ -375,22 +379,35 @@ fn read_rollout(path: &Path, account_id: &str, stats: &mut Stats) -> Vec<Replaye
             }
         }
     }
-    thin(scan.rows)
+    scan.rows
 }
 
 /// Every `.jsonl` under `roots`, sorted, and how many compressed ones were
-/// passed over. A directory that cannot be listed is skipped: there is
-/// nothing in it this reader could have read.
+/// passed over. A root that does not exist is simply not there - Codex may
+/// never have archived a session. A directory that exists and cannot be
+/// listed, or an entry that cannot be read, is counted as unreadable, so a
+/// backfill that could not see part of the history never says it saw all
+/// of it; the readable rest is still scanned.
 fn rollout_files(roots: &[PathBuf], stats: &mut Stats) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut todo: Vec<PathBuf> = roots.to_vec();
     while let Some(dir) = todo.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                stats.unreadable += 1;
+                continue;
+            }
         };
-        for e in entries.flatten() {
+        for e in entries {
+            let Ok(e) = e else {
+                stats.unreadable += 1;
+                continue;
+            };
             let path = e.path();
             let Ok(kind) = e.file_type() else {
+                stats.unreadable += 1;
                 continue;
             };
             let name = e.file_name().to_string_lossy().into_owned();
@@ -850,6 +867,65 @@ mod tests {
         );
         // No account, nothing read.
         assert!(collect("", &[root]).0.is_empty());
+    }
+
+    #[test]
+    fn concurrent_sessions_are_thinned_once_after_merging_so_a_reset_survives() {
+        // Codex's case: two sessions of one account at once. One file reads
+        // 90% at 1000 s; the other 90% at 1200 s, 0% at 1400 s and 5% at
+        // 1600 s, all for the same window. Thinned per file and again after
+        // merging, the 0% went and the reset with it.
+        let root = temp_dir("concurrent");
+        let stamp = |secs: i64| {
+            chrono::DateTime::from_timestamp(1_790_000_000 + secs, 0)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        std::fs::write(
+            root.join("rollout-a.jsonl"),
+            [meta(Some(ACCT)), snap(&stamp(1000), 90.0, 1_790_100_000)].join("\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("rollout-b.jsonl"),
+            [
+                meta(Some(ACCT)),
+                snap(&stamp(1200), 90.0, 1_790_100_000),
+                snap(&stamp(1400), 0.0, 1_790_100_000),
+                snap(&stamp(1600), 5.0, 1_790_100_000),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let (rows, _) = collect(ACCT, &[root]);
+        let kept: Vec<(f64, Option<f64>)> = rows
+            .iter()
+            .map(|r| (r.sample.at - 1_790_000_000.0, r.sample.pct))
+            .collect();
+        assert_eq!(kept, vec![(1000.0, Some(90.0)), (1400.0, Some(0.0))]);
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_listed_is_counted_and_an_absent_root_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_dir("traverse");
+        let locked = root.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("rollout.jsonl"), meta(Some(ACCT))).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root lists anything, so the case is only real for a user.
+        let blocked = std::fs::read_dir(&locked).is_err();
+        let mut stats = Stats::default();
+        let files = rollout_files(&[root.clone(), root.join("absent")], &mut stats);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if blocked {
+            assert!(files.is_empty());
+            assert_eq!(stats.unreadable, 1, "the directory that would not list is said");
+        }
+        let mut clean = Stats::default();
+        rollout_files(&[root.join("absent")], &mut clean);
+        assert_eq!(clean.unreadable, 0, "an absent optional root is no failure");
     }
 
     #[test]
