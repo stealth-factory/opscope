@@ -595,7 +595,10 @@ impl Building {
         self.last_at = Some(s.at);
         c.first_obs_at.get_or_insert(s.at);
         c.last_obs_at = Some(s.at);
-        if let Some(r) = s.reset_at {
+        // An instant at or before the cycle's own start is the end of a
+        // window already behind it - a reading past the tolerance that
+        // still states the old end - and never this cycle's end.
+        if let Some(r) = s.reset_at.filter(|r| *r > c.starts_at + tolerance(s.window_secs.or(c.window_secs))) {
             c.ends_at = Some(r);
         }
         if s.window_secs.is_some() {
@@ -700,10 +703,24 @@ pub fn fold(input: &FoldInput) -> FoldOutput {
         return fold_dated(input);
     }
     if is_rolling(samples, &mask) {
-        return FoldOutput {
-            shape: PoolShape::Rolling,
-            cycles: Vec::new(),
-        };
+        // Every dated reading is rolling; readings with no instant outside
+        // the stretch are still folded, as an undated pool's.
+        let undated: Vec<Sample> = samples
+            .iter()
+            .zip(&mask)
+            .filter(|(s, m)| !**m && s.reset_at.is_none())
+            .map(|(s, _)| s.clone())
+            .collect();
+        if undated.is_empty() {
+            return FoldOutput {
+                shape: PoolShape::Rolling,
+                cycles: Vec::new(),
+            };
+        }
+        return fold_undated(&FoldInput {
+            samples: &undated,
+            ..input.clone()
+        });
     }
     // A rolling stretch is left out; the readings either side fold as if
     // it were a gap.
@@ -746,6 +763,29 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
                 };
                 Some((at, source, seen))
             });
+            // Folding on from a kept cycle that closed on schedule: this is
+            // the reading that closed it, and the next cycle opens exactly
+            // as a fold over everything opened it at that reading.
+            if let Some((p, end)) = input
+                .prev
+                .filter(|p| p.end_reason == Some(EndReason::Scheduled))
+                .and_then(|p| Some((p, p.closed_at?)))
+            {
+                let window = p.window_secs.or(s.window_secs);
+                cur = Some(after_end(
+                    end,
+                    window,
+                    p.model,
+                    p.plan.clone(),
+                    s,
+                    plans,
+                    &mut ordinal,
+                    &mut out,
+                    &mut observed_model,
+                ));
+                prev_sample = Some(s);
+                continue;
+            }
             if let Some((start, source, seen)) = seeded {
                 let mut b = Building::new(Cycle::open(
                     ordinal,
@@ -855,59 +895,17 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
             let model_before = b.cycle.model;
             let plan = b.cycle.plan.clone();
             out.push(cur.take().expect("open").finish(Some((end, EndReason::Scheduled))));
-            // Where the new cycle starts, by the reading's own instant.
-            let next_start = match (s.reset_at, s.window_secs) {
-                (Some(r), Some(w)) if w > 0.0 && r > end => Some(r - w),
-                _ => None,
-            };
-            let (start, model, source) = match (next_start, window) {
-                (Some(ns), Some(w)) if w > 0.0 => {
-                    let tol = tolerance(Some(w));
-                    let n = ((ns - end) / w).round();
-                    let aligned = n >= 0.0 && (ns - (end + n * w)).abs() <= tol;
-                    if aligned && n >= 1.0 && model_before == CycleModel::Contiguous {
-                        // Whole windows passed unseen on a contiguous pool.
-                        for k in 0..n as u32 {
-                            out.push(hollow(ordinal, end + k as f64 * w, w, plan.clone()));
-                            observed_model.push(true);
-                            ordinal += 1;
-                        }
-                        (ns, CycleModel::Contiguous, StartSource::Server)
-                    } else if aligned && n == 0.0 {
-                        (ns, CycleModel::Contiguous, StartSource::Server)
-                    } else if ns > end + tol {
-                        (ns, CycleModel::UseAnchored, StartSource::Server)
-                    } else {
-                        (ns, CycleModel::Contiguous, StartSource::Server)
-                    }
-                }
-                (Some(ns), None) => (ns, CycleModel::Contiguous, StartSource::Server),
-                // No instant on the reading that crossed the boundary: a
-                // contiguous pool's next window is the one containing it.
-                (None, Some(w)) if w > 0.0 && model_before == CycleModel::Contiguous => {
-                    let k = ((s.at - end) / w).floor().max(0.0);
-                    for i in 0..k as u32 {
-                        out.push(hollow(ordinal, end + i as f64 * w, w, plan.clone()));
-                        observed_model.push(true);
-                        ordinal += 1;
-                    }
-                    (end + k * w, CycleModel::Contiguous, StartSource::Derived)
-                }
-                _ => (s.at.max(end), model_before, StartSource::Inferred),
-            };
-            let ends = s.reset_at.filter(|r| *r > start).or_else(|| window.map(|w| start + w));
-            let mut nb = Building::new(Cycle::open(
-                ordinal,
-                start,
-                ends,
-                s.window_secs.or(window),
-                model,
-                source,
+            cur = Some(after_end(
+                end,
+                window,
+                model_before,
+                plan,
+                s,
+                plans,
+                &mut ordinal,
+                &mut out,
+                &mut observed_model,
             ));
-            ordinal += 1;
-            observed_model.push(true);
-            nb.observe(s, plans);
-            cur = Some(nb);
         } else if let Some(at) = plan_changed {
             out.push(cur.take().expect("open").finish(Some((at, EndReason::PlanChanged))));
             cur = Some(reopen(&mut ordinal, &mut observed_model, at, s, plans));
@@ -960,6 +958,70 @@ fn fold_dated(input: &FoldInput) -> FoldOutput {
     }
 }
 
+/// The cycle `s` opens after a cycle that ended on schedule at `end`, with
+/// the hollow cycles a contiguous pool passed through unseen before it.
+/// One rule for a full fold and for folding on from a kept cycle, so the
+/// cycles a store keeps never change what comes after them.
+#[allow(clippy::too_many_arguments)]
+fn after_end(
+    end: f64,
+    window: Option<f64>,
+    model_before: CycleModel,
+    plan: Option<String>,
+    s: &Sample,
+    plans: &[PlanChange],
+    ordinal: &mut u32,
+    out: &mut Vec<Cycle>,
+    observed_model: &mut Vec<bool>,
+) -> Building {
+    // Where the new cycle starts, by the reading's own instant.
+    let next_start = match (s.reset_at, s.window_secs) {
+        (Some(r), Some(w)) if w > 0.0 && r > end => Some(r - w),
+        _ => None,
+    };
+    let (start, model, source) = match (next_start, window) {
+        (Some(ns), Some(w)) if w > 0.0 => {
+            let tol = tolerance(Some(w));
+            let n = ((ns - end) / w).round();
+            let aligned = n >= 0.0 && (ns - (end + n * w)).abs() <= tol;
+            if aligned && n >= 1.0 && model_before == CycleModel::Contiguous {
+                // Whole windows passed unseen on a contiguous pool.
+                for k in 0..n as u32 {
+                    out.push(hollow(*ordinal, end + k as f64 * w, w, plan.clone()));
+                    observed_model.push(true);
+                    *ordinal += 1;
+                }
+                (ns, CycleModel::Contiguous, StartSource::Server)
+            } else if aligned && n == 0.0 {
+                (ns, CycleModel::Contiguous, StartSource::Server)
+            } else if ns > end + tol {
+                (ns, CycleModel::UseAnchored, StartSource::Server)
+            } else {
+                (ns, CycleModel::Contiguous, StartSource::Server)
+            }
+        }
+        (Some(ns), None) => (ns, CycleModel::Contiguous, StartSource::Server),
+        // No instant on the reading that crossed the boundary: a
+        // contiguous pool's next window is the one containing it.
+        (None, Some(w)) if w > 0.0 && model_before == CycleModel::Contiguous => {
+            let k = ((s.at - end) / w).floor().max(0.0);
+            for i in 0..k as u32 {
+                out.push(hollow(*ordinal, end + i as f64 * w, w, plan.clone()));
+                observed_model.push(true);
+                *ordinal += 1;
+            }
+            (end + k * w, CycleModel::Contiguous, StartSource::Derived)
+        }
+        _ => (s.at.max(end), model_before, StartSource::Inferred),
+    };
+    let ends = s.reset_at.filter(|r| *r > start).or_else(|| window.map(|w| start + w));
+    let mut nb = Building::new(Cycle::open(*ordinal, start, ends, s.window_secs.or(window), model, source));
+    *ordinal += 1;
+    observed_model.push(true);
+    nb.observe(s, plans);
+    nb
+}
+
 /// A cycle opened at `at` by a change that was not a rollover.
 fn reopen(ordinal: &mut u32, observed: &mut Vec<bool>, at: f64, s: &Sample, plans: &[PlanChange]) -> Building {
     let mut nb = Building::new(Cycle::open(
@@ -984,6 +1046,8 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
     let mut out = Vec::new();
     let mut ordinal = input.next_ordinal;
     let mut cur: Option<Building> = None;
+    // The last figure that can mark a boundary: a cached one never does
+    // (§4), so a cached zero between two live readings is no fall.
     let mut last_pct: Option<f64> = input.prev.and_then(|p| p.peak_pct);
     let mut prev_at: Option<f64> = None;
     for s in input.samples {
@@ -1002,16 +1066,29 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
             CycleEffect::Restarted { new_start } => Some(new_start),
             _ => None,
         });
-        let fell = matches!((last_pct, s.pct), (Some(a), Some(b)) if a > near && b <= near);
+        // A refill that kept the boundary already accounts for the fall it
+        // came with: a new segment, not also a new cycle.
+        let refilled = ev.is_some_and(|e| e.effect == CycleEffect::KeptBoundary);
+        let fell = s.source != Source::Cached
+            && !refilled
+            && matches!((last_pct, s.pct), (Some(a), Some(b)) if a > near && b <= near);
         let limit_changed =
             matches!((cur.as_ref(), prev_at), (Some(b), Some(_)) if differs(b.cycle.limit_amount, s.limit, 1e-9));
-        if cur.is_none() || fell || limit_changed || restarted.is_some() {
-            let start = restarted.unwrap_or(s.at);
+        // A change of plan between readings closes the cycle where it was
+        // seen (§5.4 rule 2), dated or not.
+        let plan_changed = match (cur.as_ref(), prev_at) {
+            (Some(_), Some(p)) => plan_change_between(input.plans, p, s.at).map(|c| c.at),
+            _ => None,
+        };
+        if cur.is_none() || fell || limit_changed || plan_changed.is_some() || restarted.is_some() {
+            let start = restarted.or(plan_changed.filter(|_| !limit_changed)).unwrap_or(s.at);
             if let Some(b) = cur.take() {
                 let why = if limit_changed {
                     EndReason::LimitChanged
                 } else if restarted.is_some() {
                     EndReason::Reset
+                } else if plan_changed.is_some() {
+                    EndReason::PlanChanged
                 } else {
                     EndReason::Scheduled
                 };
@@ -1035,7 +1112,7 @@ fn fold_undated(input: &FoldInput) -> FoldOutput {
         } else if let Some(b) = cur.as_mut() {
             b.observe(s, input.plans);
         }
-        if s.pct.is_some() {
+        if s.pct.is_some() && s.source != Source::Cached {
             last_pct = s.pct;
         }
         prev_at = Some(s.at);
@@ -1612,7 +1689,9 @@ mod tests {
                 let mut pct = 0.0;
                 while at < end {
                     pct += rnd(20) as f64;
-                    let mut x = s(at, pct.min(100.0), Some(end), Some(W5));
+                    // Now and then a reading that states no instant.
+                    let reset = if rnd(8) == 0 { None } else { Some(end) };
+                    let mut x = s(at, pct.min(100.0), reset, Some(W5));
                     x.limit = Some(limit);
                     samples.push(x);
                     at += (10 + rnd(110)) as f64 * 60.0;
@@ -1665,6 +1744,143 @@ mod tests {
             thresholds: Thresholds::default(),
         });
         assert_eq!(tail.cycles, whole.cycles[2..].to_vec());
+    }
+
+    fn kept_refill(at_lo: f64, at_hi: f64) -> ResetEvent {
+        ResetEvent {
+            at_lo,
+            at_hi,
+            kind: ResetKind::Banked,
+            effect: CycleEffect::KeptBoundary,
+            signals: "bank_fall".into(),
+            pct_before: None,
+            pct_after: None,
+            reset_at_before: None,
+            reset_at_after: None,
+            group_id: None,
+            evidence: "{}".into(),
+            before_known: false,
+        }
+    }
+
+    #[test]
+    fn a_kept_boundary_refill_on_an_undated_pool_is_a_segment_not_also_a_new_cycle() {
+        // CodeRabbit's case: a banked refill takes an undated pool from 60%
+        // to 0% and keeps its boundary. The fall is the refill's, so it adds
+        // a segment and does not also close the cycle.
+        let a = 1_000_000.0;
+        let samples = vec![s(a, 30.0, None, None), s(a + H, 60.0, None, None), s(a + 2.0 * H, 0.0, None, None), {
+            s(a + 3.0 * H, 10.0, None, None)
+        }];
+        let out = run_with(&samples, &[], &[kept_refill(a + H, a + 2.0 * H)], Role::Included);
+        assert_eq!(out.cycles.len(), 1, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].allowances, 2);
+        assert_eq!(out.cycles[0].consumed_pct, Some(70.0));
+        // The same fall with no event is the undated pool's own boundary.
+        assert_eq!(run(&samples).cycles.len(), 2);
+    }
+
+    #[test]
+    fn a_cached_zero_never_marks_an_undated_boundary() {
+        // CodeRabbit's case: live 40%, cached 0%, live 45%. A cached figure
+        // can extend a cycle but never establish a reset (§4).
+        let a = 1_000_000.0;
+        let mut cached = s(a + H, 0.0, None, None);
+        cached.source = Source::Cached;
+        let samples = vec![s(a, 40.0, None, None), cached, s(a + 2.0 * H, 45.0, None, None)];
+        let out = run(&samples);
+        assert_eq!(out.cycles.len(), 1, "{:#?}", out.cycles);
+        // A live fall to zero still does.
+        let live = vec![s(a, 40.0, None, None), s(a + H, 0.0, None, None), s(a + 2.0 * H, 45.0, None, None)];
+        assert_eq!(run(&live).cycles.len(), 2);
+    }
+
+    #[test]
+    fn an_undated_cycle_is_split_at_a_plan_change() {
+        // CodeRabbit's case: 80% on Pro, then 20% on Max. Neither near zero
+        // nor a limit change, but a plan change closes the cycle (§5.4).
+        let a = 1_000_000.0;
+        let samples = vec![s(a, 80.0, None, None), s(a + 2.0 * H, 20.0, None, None)];
+        let plans = vec![
+            PlanChange { at: a - H, plan: "pro".into() },
+            PlanChange { at: a + H, plan: "max".into() },
+        ];
+        let out = run_with(&samples, &plans, &[], Role::Included);
+        assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].end_reason, Some(EndReason::PlanChanged));
+        assert_eq!(out.cycles[0].closed_at, Some(a + H));
+        assert_eq!(out.cycles[0].plan.as_deref(), Some("pro"));
+        assert_eq!(out.cycles[1].starts_at, a + H);
+        assert_eq!(out.cycles[1].peak_pct, Some(20.0));
+        assert_eq!(out.cycles[1].plan.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn undated_readings_before_a_rolling_stretch_are_still_folded() {
+        // CodeRabbit's case: two readings with no instant, then a stretch
+        // that slides with the clock. The rolling stretch keeps no cycles;
+        // the two readings before it are not thrown away with it.
+        let a = 1_000_000.0;
+        let w = 6.0 * H;
+        let mut samples = vec![s(a, 10.0, None, None), s(a + H, 12.0, None, None)];
+        for i in 0..4 {
+            let at = a + 2.0 * H + i as f64 * 0.5 * H;
+            samples.push(s(at, 20.0, Some(at + w), Some(w)));
+        }
+        let out = run(&samples);
+        assert_eq!(out.cycles.len(), 1, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].first_obs_at, Some(a));
+        assert_eq!(out.cycles[0].peak_pct, Some(12.0));
+        // Nothing but the rolling stretch: no cycles, a rolling pool.
+        let only: Vec<Sample> = samples[2..].to_vec();
+        let out = run(&only);
+        assert_eq!(out.shape, PoolShape::Rolling);
+        assert!(out.cycles.is_empty());
+    }
+
+    #[test]
+    fn a_reading_with_no_instant_after_a_kept_cycle_opens_where_a_full_fold_does() {
+        // CodeRabbit's case: a five-hour cycle ends at E, and the next
+        // reading, an hour later, states no instant. A full fold opens the
+        // next cycle at E and derives its end; folding on from the kept
+        // cycle opened it at E + 1h with no end.
+        let a = 1_000_000.0;
+        let e = a + W5;
+        let samples = vec![
+            s(a + H, 10.0, Some(e), Some(W5)),
+            s(a + 2.0 * H, 20.0, Some(e), Some(W5)),
+            s(e + H, 5.0, None, Some(W5)),
+            s(e + 2.0 * H, 8.0, None, Some(W5)),
+        ];
+        let whole = run(&samples);
+        assert_eq!(whole.cycles[1].starts_at, e);
+        assert_eq!(whole.cycles[1].ends_at, Some(e + W5));
+        incremental_matches_full(&samples, &[]);
+    }
+
+    #[test]
+    fn an_expired_instant_is_not_carried_into_the_cycle_after_it() {
+        // CodeRabbit's case: two readings past the tolerance still state the
+        // old end E. The first closes the cycle at E; the replacement must
+        // not take E back as its own end, or the second closes a cycle from
+        // E to E.
+        let a = 1_000_000.0;
+        let e = a + W5;
+        let tol = tolerance(Some(W5));
+        let samples = vec![
+            s(a + H, 50.0, Some(e), Some(W5)),
+            s(e + tol + 60.0, 0.0, Some(e), Some(W5)),
+            s(e + tol + 30.0 * 60.0, 2.0, Some(e), Some(W5)),
+        ];
+        let out = run(&samples);
+        assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[1].starts_at, e);
+        assert_eq!(out.cycles[1].ends_at, Some(e + W5));
+        assert!(out.cycles.iter().all(|c| c.closed_at.is_none_or(|x| x > c.starts_at)));
+        // A later instant that does arrive is still taken.
+        let mut later = samples.clone();
+        later.push(s(e + 2.0 * H, 3.0, Some(e + W5 + 60.0), Some(W5)));
+        assert_eq!(run(&later).cycles[1].ends_at, Some(e + W5 + 60.0));
     }
 
     #[test]
