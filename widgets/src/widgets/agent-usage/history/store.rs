@@ -527,6 +527,7 @@ impl History {
         let mut refold: Vec<(i64, f64)> = Vec::new();
         let mut account_refold: Vec<(i64, f64)> = Vec::new();
         let mut banks_changed: Vec<i64> = Vec::new();
+        let mut unchanged_banks: Vec<(i64, BankReading)> = Vec::new();
         for o in obs {
             let key = key_of(&tx, o)?;
             if o.has_stable_id() && meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
@@ -560,9 +561,15 @@ impl History {
                         |r| r.get(0),
                     )
                     .map_err(sql)?;
-                if write_bank(&tx, account, b)? {
-                    banks_changed.push(account);
-                    account_refold.push((account, opened.unwrap_or(b.at)));
+                match write_bank(&tx, account, b, false)? {
+                    BankWrite::Written => {
+                        banks_changed.push(account);
+                        account_refold.push((account, opened.unwrap_or(b.at)));
+                    }
+                    // The same inventory as the last stored: kept back, but
+                    // looked at again once this pass's resets are folded.
+                    BankWrite::Unchanged => unchanged_banks.push((account, b.clone())),
+                    BankWrite::Older => {}
                 }
             }
             if let Some(p) = &o.plan {
@@ -602,6 +609,41 @@ impl History {
         refold.dedup_by_key(|x| x.0);
         for (pool, from) in refold {
             refold_pool(&tx, pool, Some(from), t)?;
+        }
+        // An unchanged bank reading is the evidence an `issued` reset needs
+        // (§5.6: the bank read on both sides with nothing spent), so one
+        // that closes the bracket of a reset still `unknown` is kept, and
+        // the account folded again from the reading before it. Otherwise
+        // banks are written only on change (§3.7).
+        for (account, b) in unchanged_banks {
+            let last: Option<f64> = tx
+                .query_row(
+                    "SELECT MAX(at) FROM bank_sample WHERE account_id = ?1",
+                    [account],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            let Some(last) = last.filter(|l| *l < b.at) else {
+                continue;
+            };
+            let waiting: bool = tx
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM reset_event e JOIN pool p ON p.id = e.pool_id
+                      WHERE p.account_id = ?1 AND e.kind = 'unknown' AND e.at_hi > ?2 AND e.at_hi <= ?3)",
+                    params![account, last, b.at],
+                    |r| r.get(0),
+                )
+                .map_err(sql)?;
+            if waiting && write_bank(&tx, account, &b, true)? == BankWrite::Written {
+                rebuild_bank_events(&tx, account)?;
+                let mut again: Vec<(i64, f64)> = pools_of(&tx, account)?.into_iter().map(|p| (p, last)).collect();
+                overage::refold_linked(&tx, &mut again)?;
+                again.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+                again.dedup_by_key(|x| x.0);
+                for (pool, from) in again {
+                    refold_pool(&tx, pool, Some(from), t)?;
+                }
+            }
         }
         tx.commit().map_err(sql)
     }
@@ -1070,9 +1112,19 @@ fn write_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String>
     Ok(n > 0)
 }
 
-/// Write a bank reading when it differs from the latest one stored and is
-/// newer than it. True when it was written.
-fn write_bank(tx: &Transaction, account: i64, b: &BankReading) -> Result<bool, String> {
+/// What [`write_bank`] did with a reading.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BankWrite {
+    Written,
+    /// Newer than the latest stored, and the same inventory.
+    Unchanged,
+    /// At or before the latest stored.
+    Older,
+}
+
+/// Write a bank reading when it is newer than the latest one stored and
+/// differs from it - or, with `unchanged_too`, when it is newer at all.
+fn write_bank(tx: &Transaction, account: i64, b: &BankReading, unchanged_too: bool) -> Result<BankWrite, String> {
     let last: Option<(f64, i64, Option<String>)> = tx
         .query_row(
             "SELECT at, left, credits FROM bank_sample WHERE account_id = ?1 ORDER BY at DESC LIMIT 1",
@@ -1083,8 +1135,11 @@ fn write_bank(tx: &Transaction, account: i64, b: &BankReading) -> Result<bool, S
         .map_err(sql)?;
     let credits = b.credits_json();
     if let Some((at, left, was)) = &last {
-        if b.at <= *at || (*left as u64 == b.left && *was == credits) {
-            return Ok(false);
+        if b.at <= *at {
+            return Ok(BankWrite::Older);
+        }
+        if !unchanged_too && *left as u64 == b.left && *was == credits {
+            return Ok(BankWrite::Unchanged);
         }
     }
     let n = tx
@@ -1093,7 +1148,7 @@ fn write_bank(tx: &Transaction, account: i64, b: &BankReading) -> Result<bool, S
             params![account, b.at, b.left as i64, credits],
         )
         .map_err(sql)?;
-    Ok(n > 0)
+    Ok(if n > 0 { BankWrite::Written } else { BankWrite::Older })
 }
 
 /// Write the plan when it differs from the latest one stored; the time it
@@ -2197,6 +2252,46 @@ mod tests {
             })
             .unwrap();
         assert!(raw.contains("spent"), "{raw}");
+    }
+
+    #[test]
+    fn an_unchanged_bank_read_after_a_reset_is_kept_so_the_reset_reads_issued() {
+        // Codex's and CodeRabbit's case: the bank is read before a reset and
+        // again, unchanged, after it. Dropping the second reading left the
+        // reset `unknown` for as long as the inventory stayed the same.
+        let p = temp("bank-confirm");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let end = a + 3.0 * 86_400.0;
+        let bank = |at: f64| BankReading {
+            at,
+            left: 1,
+            credits: Some(vec![super::super::RawCredit {
+                id: Some("c1".into()),
+                status: "available".into(),
+                expires_at: Some(9e9),
+            }]),
+        };
+        let mut o = obs(vec![lane("secondary_window", 80.0, a, end, WEEK)]);
+        o.bank = Some(bank(a));
+        h.record(std::slice::from_ref(&o), &t, a).unwrap();
+        // Ten minutes on, watching: back to zero, the same end, the same bank.
+        let mut o = obs(vec![lane("secondary_window", 0.0, a + 600.0, end, WEEK)]);
+        o.bank = Some(bank(a + 600.0));
+        h.record(std::slice::from_ref(&o), &t, a + 600.0).unwrap();
+        let kinds = || -> Vec<String> {
+            let mut st = h.conn.prepare("SELECT kind FROM reset_event ORDER BY at_hi").unwrap();
+            st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+        };
+        assert_eq!(kinds(), vec!["issued".to_string()]);
+        // Two readings either side, no bank event: nothing was spent.
+        assert_eq!((h.count("bank_sample"), h.count("bank_event")), (2, 0));
+        // The same bank again, with no reset waiting on it: not written.
+        let mut o = obs(vec![lane("secondary_window", 0.0, a + 1200.0, end, WEEK)]);
+        o.bank = Some(bank(a + 1200.0));
+        h.record(std::slice::from_ref(&o), &t, a + 1200.0).unwrap();
+        assert_eq!(h.count("bank_sample"), 2);
     }
 
     #[test]
