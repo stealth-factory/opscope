@@ -662,31 +662,24 @@ underneath it that the GPT is GPT-OSS.
 It is present only while Antigravity is running, which the pane does not
 disguise: no process, no port, no section.
 
-Google will answer for the same quota when the app is closed, on the same
-account. The app's own answer is still preferred — it moves as the app is
-used, where Google's is a record — so Google is asked only when there is
-nothing running to ask, and **the heading says which was read**:
+**Nothing is ever asked of Google.** Earlier releases also read the quota, the
+per-model Gemini allowance and the Code Assist tier from Google's internal
+`cloudcode-pa.googleapis.com` endpoints, with the OAuth token Antigravity
+leaves on disk. Google told T3 Code that calling those endpoints from an
+outside client can get the account flagged
+([pingdotgg/t3code#43026](https://github.com/pingdotgg/t3code/pull/43026)), and
+the Antigravity terms count third-party software using its OAuth sign-in as a
+breach, so the widget no longer reads that token or calls those endpoints.
+What went with them is the Plan block (tier, Google AI plan, project) and the
+"Gemini, per model" rows; neither the app nor `agy` reports them.
 
-```
- ── QUOTA ── live · account-wide, from Google - the app is not running
-```
-
-So the quota survives the app being closed, for about an hour after it last
-ran — the credential Antigravity leaves behind lasts that long, and this widget
-deliberately does not renew it on Antigravity's behalf.
-
-**Four sources**, each of them optional:
+**Three sources**, each of them optional and each on this machine:
 
 | order | source | works when |
 |---|---|---|
 | 1 | Antigravity itself — the app, or an `agy` you started | Antigravity is open and answers outside readers |
 | 2 | `agy -p /usage`, run by the widget (`antigravity_start`) | the CLI is installed, signed in and 1.1.11 or later |
-| 3 | Google | within an hour of the last run |
-| 4 | `agy`, started under a pty by the widget (`antigravity_start`) | only an `agy` older than 1.1.11 |
-
-The second costs a process and a few seconds where Google costs one request,
-and is asked first anyway: it is the only source left with the **Gemini
-group**. Google's summary has only ever carried the Claude and GPT-OSS group.
+| 3 | `agy`, started under a pty by the widget (`antigravity_start`) | only an `agy` older than 1.1.11 |
 
 Nothing that runs for the widget outlives the fetch, and **an `agy` you started
 yourself is never shut down by this** — it would have answered as source 1
@@ -695,7 +688,7 @@ long before anything was started.
 **`agy` builds from October 2026 close source 1.** Their language server
 refuses every outside caller with `missing CSRF token`, and hands the token
 only to processes `agy` starts itself — it is in no file, log or environment
-the widget can read, and the widget does not go looking. The pty start (4)
+the widget can read, and the widget does not go looking. The pty start (3)
 reads the same server, so it is closed too, and kept only for older builds.
 
 What still works is `agy`'s own `/usage` command in print mode — the one
@@ -722,66 +715,21 @@ with it; and with auto-update off. Releases before 1.1.11 could send an
 unknown slash command on to a model as a prompt, which would spend the quota
 being read, so those are never asked — the tab says to update instead.
 
-When `/usage` cannot be read and Google's summary is what is on screen, the
-tab says the app's server refused rather than reading like an app that is
-shut:
+**Every step that can fail says which step it was**, on the tab and on `[+]`:
 
 ```
- ── QUOTA ── live · account-wide, from Google - the app's server refused
-  Antigravity's language server now refuses outside readers: it wants a
-  CSRF token it gives only to processes it starts itself. This is Google's
-  summary instead. Google publishes no grouped Gemini limit.
+ no quota either: `agy -p /usage` printed no report - it may not be signed in
+ no quota either: starting `agy` is off - set agent_usage.antigravity_start to true — press `,` to set it here
 ```
 
-Under the groups, the tab also draws **each Gemini model's own allowance**,
-which Google publishes per model, so it says which model is spending the
-group's limit:
-
-```
-  Gemini, per model
-    Each model's own allowance, from Google - not slices of one shared limit.
-   gemini-3-flash        ░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
-   gemini-2.5-pro        ░░░░░░░░░░░░░░░░░░░   0%        resets in 4h 58m
-```
-
-They are not added up or averaged into a group figure, because Google states
-none. They stay on the tab: `[+]` shows the four group lanes `agy` itself
-draws. Only when no Gemini group came back does `[+]` take one lane from them,
-`gemini busiest` — the model with the least left — since they are then the
-Gemini quota there is. In that case, if the per-model call fails the reason
-is drawn where the rows would be; with a group, a failure is left unsaid,
-since a warning under four good bars reads as though the bars were wrong.
-
-**Every step that can fail says which step it was**, on the tab and on `[+]`,
-because "no quota" covered four situations wanting different things from the
-reader:
-
-```
- no quota either: Antigravity's token expired 51m ago - it refreshes them
- itself, so open it or run `agy` once and sign in
- no quota either: asking Google is off - set agent_usage.antigravity_remote to true — press `,` to set it here
- no quota either: Antigravity has not signed in on this machine - run `agy`
- once and sign in
- no quota either: Google refused the Antigravity token: …
-```
-
-The first three are decided before anything leaves the machine, so the
-sentence keeps saying which it was even while the refusal is being held rather
-than retried — otherwise a held failure degrades into "Google did not answer"
-about a credential that expired an hour ago and was never sent.
-
-When neither source answers, `[+]` names the agent with the reason rather
-than sending the reader to open an app that would not have helped:
+When nothing answers, `[+]` names the agent with the reason rather than
+sending the reader to open an app that would not have helped:
 
 ```
   ANTIGRAVITY
-   no quota · neither the language server inside the app nor Google
-   answered. Open Antigravity, or sign in again if its token has lapsed.
+   no quota · neither the language server inside the app nor `agy`
+   answered.
 ```
-
-That sentence used to be empty whenever the tier read perfectly well, which
-is most of the time — so the summary named the agent as quiet and then said
-nothing about why.
 
 **The roll-call is what is left over.** `No quota published by: …` once led
 this block and named every quiet agent, with the explanations below it. That
@@ -791,21 +739,6 @@ Cursor, Grok and Copilot now explain themselves the same way Antigravity does,
 so the roll-call lists only a name we still have nothing to say about —
 vanishing entirely when they all have. An agent that is neither detected nor
 listed in `agent_usage.agents` is not on this screen at all.
-
-The tier is read on the same credential, which lasts about an hour, so the
-section is simply **absent** between refreshes rather than stale.
-
-**Two plans are shown, not one**, and they can disagree: the Code Assist tier
-this project sits on, and the Google AI plan the account holds. Here that reads
-`free-tier` against `Google AI Ultra`, and neither is wrong — the paid Code
-Assist tier is a Cloud licensing arrangement, wanting Cloud terms accepted and
-your own project nominated, while the limits you actually run against come from
-the consumer subscription. Picking one as "the" plan would have hidden whichever
-question the reader was asking.
-
-Google's own upgrade pitch is left as it arrives, inconsistencies and all: it
-offers this account more requests per day beside a line saying it is already
-on the best plan available.
 
 **Grok** — real too, and the third of these I first wrote off. The session
 transcripts under `~/.grok/` carry a running token total, timestamped, so each
@@ -1226,7 +1159,6 @@ some tabs already finish on a blank and would otherwise leave two.
 | **Copilot** | the same account call as the quota | plan, seat date, organisation, sku, billing mode, enabled features |
 | **Codex** | already in hand with the quota | plan type and credit balance — and that is genuinely all of it |
 | **Grok** | the client log | tier, billing period, on-demand cap and prepaid balance |
-| **Antigravity** | the account | Code Assist tier, Google AI plan, project, auth method — and no usage whatsoever |
 
 Grok's tier moved out of its quota heading to join them, so no agent states
 its plan in two different shapes.
@@ -1563,7 +1495,6 @@ Four settings, all on by default except the interval:
 | key | default | what it does |
 |---|---|---|
 | `antigravity_start` | `true` | may the widget run the `agy` CLI to read the quota, when no running app answers. `agy -p /usage` on 1.1.11 or later - a command, not a prompt, so no tokens - in a private directory, its process group killed when the reading is taken; older builds are started under a pty instead. Never touches a CLI you started |
-| `antigravity_remote` | `true` | may Antigravity's quota be asked of Google when the app is not running — same credential as its plan. Off turns only that ask off; starting `agy` is `antigravity_start`, and the tab has no app-closed quota only when both are off |
 | `grok_ping` | `true` | may Grok's own service be asked for the live allowance, on the credential the Grok CLI leaves behind, **and** may that credential be refreshed so the asking keeps working |
 | `grok_ping_minutes` | `15` | how often. The window moves over days, but the spend inside it moves while you work, so a quarter of an hour keeps the figure actionable. Thirty is the most it will take. A reading older than thirty-one minutes is drawn as cached, so the ceiling sits a minute under it and the freshest answer the widget can hold is always inside the window that judges it. A larger number in a hand-edited file is clamped, and the tab says the interval actually used |
 

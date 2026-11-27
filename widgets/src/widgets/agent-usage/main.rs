@@ -2025,9 +2025,8 @@ struct Config {
     refresh: f64,
     /// Grok is the only agent with no live quota unless it is asked for one.
     /// On by default, as of 0.14: the request goes to the endpoint the Grok
-    /// CLI itself bills through, carrying the token that CLI left on disk,
-    /// which is the same shape as `antigravity_remote` and was on from the
-    /// start. It was off for a release on the principle that a widget
+    /// CLI itself bills through, carrying the token that CLI left on disk.
+    /// It was off for a release on the principle that a widget
     /// which reads should not start talking to a vendor because it was
     /// launched - and the figure it showed instead was a log line that
     /// moves only when Grok is used on this machine, drawn with a `cached`
@@ -2041,15 +2040,6 @@ struct Config {
     /// then stops, silently, which is the failure the refresh exists to
     /// prevent. Nobody wants the first without the second.
     grok_ping: bool,
-    /// Whether Antigravity's quota may be asked of Google when nothing is
-    /// serving it locally.
-    ///
-    /// On by default: it asks for the same reading the app already
-    /// serves over localhost, from the same host and with the same
-    /// credential the tier is already fetched with. Turning it off costs
-    /// the quota whenever Antigravity is closed and spares nothing that the
-    /// tier request has not already spent.
-    antigravity_remote: bool,
     /// Whether the widget may start the `agy` CLI to read the quota it
     /// serves, when nothing else has one.
     ///
@@ -2060,8 +2050,9 @@ struct Config {
     /// moment the reading is taken, and reaped, so nothing outlives the
     /// fetch; and a CLI the reader started themselves is found by the
     /// ordinary local probe long before this runs, so this can never shut
-    /// one down. Turn it off and the quota lasts an hour past the last time
-    /// Antigravity ran, which is the token's life.
+    /// one down. It is also the only source left once the app's own
+    /// server refuses outside readers. Turn it off and the tab has a quota
+    /// only while a language server it can read is running.
     antigravity_start: bool,
     /// Days a week that count towards a window's pace, from Monday: 5 is
     /// Monday to Friday. Seven, the default, is the wall clock. Clamped to
@@ -2176,10 +2167,6 @@ fn config_from(raw: &serde_json::Value, legacy_section: bool) -> Config {
             .unwrap_or(true),
         factory_api_key: tc::cfg_str(&raw, "factory_api_key", ""),
         factory_api_key_env: tc::cfg_str(&raw, "factory_api_key_env", crate::droid::API_KEY_ENV),
-        antigravity_remote: raw
-            .get("antigravity_remote")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true),
         antigravity_start: raw
             .get("antigravity_start")
             .and_then(|v| v.as_bool())
