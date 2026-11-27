@@ -486,6 +486,20 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     out
 }
 
+/// The lanes the history keeps for Perplexity: [`lanes`], with the bonus
+/// balance dated by its next grant's expiry. A balance's `reset` is the
+/// soonest expiry it states, and without it a grant that lapses beside a
+/// live one reads in the history as credits spent. The tab's bonus bar
+/// keeps no clock, so only the history gets the date.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let expires = d.credits.as_ref().and_then(|c| c.bonus_expires);
+    let mut out = lanes(d);
+    for lane in out.iter_mut().filter(|l| l.pool_key == "bonus") {
+        lane.reset = expires;
+    }
+    out
+}
+
 /// What the history needs from Perplexity beyond its lanes. No stable
 /// account id is read, so the account is keyed on the profile.
 pub fn history_facts(d: &Data) -> crate::history::Facts {
@@ -1524,6 +1538,24 @@ mod tests {
                 assert_eq!(kept, want, "width {w}, indent {indent}");
             }
         }
+    }
+
+    #[test]
+    fn the_history_dates_the_bonus_balance_by_its_next_expiry() {
+        // Codex's case: a grant lapsing beside a live one lowers the bonus
+        // balance, and with no expiry on the sample the history booked the
+        // fall as spend.
+        let soon = (now() + 86400.0).floor();
+        let d = Data::answered(&format!(
+            r#"{{"credit_grants":[{{"type":"promotional","amount_cents":100,"expires_at_ts":{soon}}},
+            {{"type":"promotional","amount_cents":200,"expires_at_ts":{}}}],"total_usage_cents":0}}"#,
+            soon + 86400.0 * 30.0
+        ));
+        let kept = history_lanes(&d);
+        let bonus = kept.iter().find(|l| l.pool_key == "bonus").unwrap();
+        assert_eq!(bonus.reset, Some(soon));
+        // The tab's bar still keeps no clock.
+        assert_eq!(lanes(&d).iter().find(|l| l.pool_key == "bonus").unwrap().reset, None);
     }
 
     #[test]

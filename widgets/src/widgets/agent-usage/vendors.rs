@@ -497,8 +497,10 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
             continue;
         }
         let mut lanes = match name {
-            // One pool per Gemini model, where the summary has one lane.
+            // One pool per quota group and window.
             "antigravity" => crate::antigravity::history_lanes(&s.antigravity),
+            // The bonus balance dated by its next grant's expiry.
+            "perplexity" => crate::perplexity::history_lanes(&s.perplexity),
             _ => lanes_of(name, s),
         };
         let facts = facts_of(s);
