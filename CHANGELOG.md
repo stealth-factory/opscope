@@ -3,6 +3,16 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.16.1] - 2026-11-27
+
+### Bug Fixes
+
+- **agent-usage**: Stop calling Antigravity's internal Google APIs (#685)
+
+### Documentation
+
+- **google-analytics**: Explain how GA4 grants decide which properties show (OPS-186) [skip-cr] (#679)
+
 ## [2.16.0] - 2026-11-18
 
 ### Bug Fixes

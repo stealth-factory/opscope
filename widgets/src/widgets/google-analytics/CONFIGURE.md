@@ -16,7 +16,7 @@ The field types, defaults, order, and inline help come from `settings.json` in t
 
 ## What has to exist on Google's side first
 
-Follow `docs/google-setup.md` in this repository: one Cloud project, the Analytics Data API and Analytics Admin API enabled (the Search Console API too if `google-search-console` will share the key), a service account with a JSON key saved outside any repository and `chmod 600`, and the service account's email added as **Viewer** on each GA4 property under Property access management.
+Follow `docs/google-setup.md` in this repository: one Cloud project, the Analytics Data API and Analytics Admin API enabled (the Search Console API too if `google-search-console` will share the key), a service account with a JSON key saved outside any repository and `chmod 600`, and the service account's email added as **Viewer** on each GA4 property under Property access management. An account-level Viewer grant covers every property in that account; grant per property to keep the key to the ones the widget should show.
 
 These steps are the user's to take in Google's consoles. Do not attempt them on the user's behalf and do not guess whether they are done: the widget names each missing step on screen (API not enabled, no access, `invalid_grant`).
 
