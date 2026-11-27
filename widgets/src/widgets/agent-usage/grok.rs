@@ -309,7 +309,11 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
 /// the configured one and the reading in between is the one already had.
 /// The credit window, whether it came from the server, when it was asked
 /// for, and - when it did not - which of the four reasons applies.
-fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, String) {
+///
+/// `raw` is `auth.json` as the caller read it, once: the caller takes the
+/// pass's account id from the same body, so the id the history files the
+/// quota under can never name a different sign-in from the one asked.
+fn quota_now(caches: &mut Caches, cfg: &Config, raw: Option<&str>) -> (Option<Quota>, bool, f64, String) {
     let from_log = || {
         newest_quota(tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str))
     };
@@ -321,12 +325,11 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // recorded. The log used to win outright, and on this machine that
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
-    let raw = read_auth();
-    let account = raw.as_deref().and_then(parse_token_account);
+    let account = raw.and_then(parse_token_account);
     let ping = ping_key(account.as_deref());
     let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
-    let key = match token_entry_in(raw.as_deref()).and_then(|e| token_of(&e, now())) {
+    let key = match token_entry_in(raw).and_then(|e| token_of(&e, now())) {
         Ok(k) => k,
         Err(why) => {
             // The widget's own refresh has already been tried after the
@@ -618,8 +621,13 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         // no session files is the fresh-install path, and returning here
         // used to skip the only refresh that can keep the ask working.
         refresh_if_token_lapsing(caches, cfg, 0.0);
-        let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg);
+        // Still signed in with no session on disk, so the readings file
+        // under the same id as on any other pass. Left empty, they went to
+        // a profile key that the first session then abandoned.
+        let raw = read_auth();
+        let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg, raw.as_deref());
         return Data {
+            account_id: account_of(raw.as_deref()),
             quota,
             quota_live,
             quota_at,
@@ -696,8 +704,12 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     if !refreshed {
         refresh_if_token_lapsing(caches, cfg, newest);
     }
-    let account_id = token_account().unwrap_or_default();
-    let quota_read = quota_now(caches, cfg);
+    // One read of auth.json for both: an id taken from one read and a
+    // quota asked with another could name two sign-ins, and the history
+    // would file the second account's figures under the first's key.
+    let raw = read_auth();
+    let account_id = account_of(raw.as_deref());
+    let quota_read = quota_now(caches, cfg, raw.as_deref());
     Data {
         account_id,
         ok: true,
@@ -786,6 +798,13 @@ fn parse_token_account(raw: &str) -> Option<String> {
 /// about it between polls.
 pub fn account_id() -> Option<String> {
     token_account()
+}
+
+/// The account id a pass files its readings under, from a body of
+/// `auth.json` already read; empty when nobody is signed in, which leaves
+/// the history's profile fallback to apply.
+fn account_of(raw: Option<&str>) -> String {
+    raw.and_then(parse_token_account).unwrap_or_default()
 }
 
 fn token_account() -> Option<String> {
@@ -2518,6 +2537,10 @@ mod tests {
         );
         assert_eq!(parse_token_account("{}"), None);
         assert_eq!(parse_token_account(r#"{"other":{"no":"key"}}"#), None);
+        // The id a pass files under comes from the body it asked with, and
+        // nobody signed in leaves it empty for the profile fallback.
+        assert_eq!(account_of(Some(r#"{"issuer|acct-a":{"key":"k"}}"#)), "issuer|acct-a");
+        assert_eq!(account_of(None), "");
     }
 
     #[test]
