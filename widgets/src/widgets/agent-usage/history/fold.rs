@@ -61,7 +61,7 @@
 /// Bumped whenever a change here, or in [`super::resets`], would fold the
 /// same samples differently. A file stamped with another version is folded
 /// again from its samples when it is opened.
-pub const DETECTOR_VERSION: i64 = 5;
+pub const DETECTOR_VERSION: i64 = 6;
 
 /// A figure at or above this is "exhausted" (§3.6 `exhausted_at`, §6.2).
 pub const EXHAUSTED_PCT: f64 = 99.5;
