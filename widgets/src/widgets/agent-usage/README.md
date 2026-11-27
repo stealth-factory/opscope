@@ -415,7 +415,10 @@ capped by a monthly spend limit the account sets on cursor.com.
 A personal cap reads **your own** spend against your own limit. A shared team
 budget reads the pool's spend against the same limit and is labelled
 `team pool`, because that is the population the ceiling belongs to — the same
-percentage means a different thing in each case. What is left is worked out
+percentage means a different thing in each case. A team budget with no
+ceiling, or with extra usage switched off, has no limit for the pool's total to
+be read against, so there the figure, and what the history keeps, is your own
+spend. What is left is worked out
 from the pair rather than taken as given, since a cap lowered below what is
 already spent would otherwise read *"-$9.00 left"*, which is arithmetic where
 a reader needs a fact.
