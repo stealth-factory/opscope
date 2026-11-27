@@ -1712,10 +1712,15 @@ fn closed_by_rolling(tx: &Transaction, pool: i64, c: &Cycle, t: &Thresholds) -> 
         return Ok(false);
     }
     let reach = closing.at + 2.0 * fold::tolerance(closing.window_secs);
+    // Through the first reading past `reach` and at least the third: a run
+    // needs both, and stopping at the first sparse reading past `reach`
+    // left a third one out that a full fold reads.
     let mut st = tx
         .prepare(&format!(
             "SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at >= ?2
-               AND at <= (SELECT COALESCE(MIN(at), ?3) FROM sample WHERE pool_id = ?1 AND at > ?3)
+               AND at <= MAX(
+                 (SELECT COALESCE(MIN(at), ?3) FROM sample WHERE pool_id = ?1 AND at > ?3),
+                 COALESCE((SELECT at FROM sample WHERE pool_id = ?1 AND at >= ?2 ORDER BY at LIMIT 1 OFFSET 2), ?3))
              ORDER BY at"
         ))
         .map_err(sql)?;
@@ -3162,6 +3167,27 @@ mod tests {
         let e = a + WEEK;
         h.record(&[obs(vec![lane("secondary_window", 40.0, e - 2.0 * H, e, WEEK)])], &t, e - 2.0 * H).unwrap();
         for (k, mins) in [10.0, 70.0, 130.0, 190.0, 250.0].into_iter().enumerate() {
+            let at = e + mins * 60.0;
+            h.record(&[obs(vec![lane("secondary_window", 41.0 + k as f64, at, at + WEEK, WEEK)])], &t, at).unwrap();
+        }
+        let (stored, full) = stored_then_full(&mut h, "secondary_window");
+        assert_eq!(stored.0, full.0, "{:#?}\n{:#?}", stored.0, full.0);
+    }
+
+    #[test]
+    fn a_sparse_rolling_stretch_after_a_kept_close_is_read_far_enough_to_confirm() {
+        // CodeRabbit's case: three readings in use after E, at 10, 250 and
+        // 310 minutes, each stating a reset a week after its own fetch. The
+        // second is already past two tolerances, so the probe stopped there
+        // with two readings, and a run needs three: the stored fold kept the
+        // scheduled close that a full fold masks.
+        let p = temp("kept-rolling-sparse");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let e = a + WEEK;
+        h.record(&[obs(vec![lane("secondary_window", 40.0, e - 2.0 * H, e, WEEK)])], &t, e - 2.0 * H).unwrap();
+        for (k, mins) in [10.0, 250.0, 310.0].into_iter().enumerate() {
             let at = e + mins * 60.0;
             h.record(&[obs(vec![lane("secondary_window", 41.0 + k as f64, at, at + WEEK, WEEK)])], &t, at).unwrap();
         }
