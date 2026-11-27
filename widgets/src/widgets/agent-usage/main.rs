@@ -2888,25 +2888,43 @@ fn main() {
                         g.installed = installed.clone();
                     }
                 }
-                let mut found = vendors::read_all(&mut caches, &cfg, installed);
-                // The utilisation history is a by-product of the pass: what
-                // it read, written where it changed (OPS-304). The recorder
-                // catches its own panics and says why on its status line, so
-                // one there never discards the readings this pass fetched.
+                let found = vendors::read_all(&mut caches, &cfg, installed);
                 let at = now();
-                found.history = recorder.pass(&vendors::observations(&found, at), &cfg.history, at);
-                found
+                let obs = vendors::observations(&found, at);
+                (found, obs, at)
             }));
             // The press is spent on the pass it asked for. Left standing, a
             // reading kept for being under the floor would be asked again
             // by a later timed pass the moment it crossed it.
             caches.readings.asked_at = 0.0;
             match read {
-                Ok(found) => {
+                Ok((mut found, obs, at)) => {
+                    // The readings are published before the history is
+                    // written. A new detector or a changed threshold refolds
+                    // every pool, and the local-log budget does not bound
+                    // that, so publishing after it left the first pass on
+                    // the loading rows and a later one on old readings until
+                    // it was done. The history drawn meanwhile is the last
+                    // pass's, which is what it was a moment before.
+                    let mut stamp = None;
                     if let Ok(mut g) = poller.lock() {
+                        found.history = std::mem::take(&mut g.history);
                         *g = found;
                         g.fetched = now();
                         g.sharing = shared::sharing_line(&caches);
+                        stamp = Some(g.fetched);
+                    }
+                    // The utilisation history is a by-product of the pass:
+                    // what it read, written where it changed (OPS-304). The
+                    // recorder catches its own panics and says why on its
+                    // status line, so one there never discards the readings
+                    // this pass fetched. Attached only to the pass it was
+                    // written from.
+                    let history = recorder.pass(&obs, &cfg.history, at);
+                    if let Ok(mut g) = poller.lock() {
+                        if stamp == Some(g.fetched) {
+                            g.history = history;
+                        }
                     }
                     // A save that fails costs the next start a slower first
                     // read and nothing else; there is nothing on screen it
