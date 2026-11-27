@@ -2184,8 +2184,22 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
                 samples: s,
             })
             .collect();
-        // The last sample already folded opens the first delta.
-        let mut own: Vec<Sample> = before.iter().cloned().collect();
+        // The last sample already folded opens the first delta, cached or
+        // not, as in a full fold: `before` skips cached readings for reset
+        // detection, and a delta from the live one before a cached reading
+        // overlapped the span already kept up to it.
+        let opens: Option<Sample> = match after {
+            Some(at) => tx
+                .query_row(
+                    &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at <= ?2 ORDER BY at DESC LIMIT 1"),
+                    params![pool, at],
+                    sample_row,
+                )
+                .optional()
+                .map_err(sql)?,
+            None => None,
+        };
+        let mut own: Vec<Sample> = opens.into_iter().collect();
         own.extend(samples.iter().cloned());
         // A balance's grant expiries stated by readings before these and
         // still ahead of them: a fall across one is expiry, as the full
@@ -2734,6 +2748,37 @@ mod tests {
     }
 
     #[test]
+    fn a_balance_s_spend_across_a_cached_reading_is_counted_once() {
+        // CodeRabbit's case: 300 live, 280 cached, 250 live. The write that
+        // brought 250 opened its delta from the live 300, over the span
+        // 300 to 280 already kept: 70 spent where a full fold has 50.
+        let p = temp("span-cached");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let balance = |left: f64, at: f64, stale: bool| Lane {
+            label: "credits".into(),
+            pool_key: "credits".into(),
+            role: PoolRole::Balance,
+            unit: Unit::Credits,
+            limit: Some(left),
+            pct: f64::NAN,
+            fetched_at: at,
+            stale,
+            ..Lane::default()
+        };
+        for (left, at, stale) in [(300.0, a, false), (280.0, a + 600.0, true), (250.0, a + 1200.0, false)] {
+            h.record(&[obs(vec![balance(left, at, stale)])], &t, at).unwrap();
+        }
+        let spent = |h: &History| -> f64 { h.conn.query_row("SELECT TOTAL(amount) FROM overage_span", [], |r| r.get(0)).unwrap() };
+        assert_eq!(spent(&h), 50.0);
+        let tx = h.conn.transaction().unwrap();
+        refold_pool(&tx, 1, None, &t).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(spent(&h), 50.0);
+    }
+
+    #[test]
     fn one_write_reads_a_bounded_number_of_samples_however_long_the_history() {
         let p = temp("bounded");
         let mut h = History::open(&p).unwrap();
@@ -2761,9 +2806,12 @@ mod tests {
         let pass = |at: f64| {
             let start = a + ((at - a) / w).floor() * w;
             let pct = 10.0 + (at - start) / w * 80.0;
+            // Every third balance reading a cached one, so the seam where a
+            // write resumes on a cached reading is folded as a full fold is.
+            let cached = ((at - a) / (0.5 * H)) as i64 % 3 == 1;
             obs(vec![
                 lane("primary_window", pct, at, start + w, w),
-                balance(1000.0 - (at - a) / H, at),
+                Lane { stale: cached, ..balance(1000.0 - (at - a) / H, at) },
                 rolling(at),
             ])
         };
