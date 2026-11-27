@@ -868,8 +868,10 @@ pub mod read {
             Ok(month_totals(&balance_moves(&samples, &expiries(&samples)), local_month))
         }
 
-        /// **The exact per-request charges** of an overage pool between `from`
-        /// and `to` (epoch seconds, inclusive), oldest first: Cursor's and
+        /// **The exact per-request charges** of an overage pool from `from`
+        /// up to but not including `to` (epoch seconds), oldest first - so
+        /// a charge on the boundary two adjacent cycles share belongs to the
+        /// later one, never to both: Cursor's and
         /// SpaceXSI's, each at its own instant, so it lands in exactly one
         /// included cycle. Compare with the cycle's `exhausted_at` for how long
         /// after exhaustion the spend began.
@@ -881,7 +883,7 @@ pub mod read {
                 .conn
                 .prepare(
                     "SELECT event_key, at, amount, model FROM overage_event
-                      WHERE overage_id = ?1 AND at >= ?2 AND at <= ?3 ORDER BY at, event_key",
+                      WHERE overage_id = ?1 AND at >= ?2 AND at < ?3 ORDER BY at, event_key",
                 )
                 .map_err(sql)?;
             let rows = st
@@ -1666,6 +1668,12 @@ mod tests {
             .unwrap();
         assert_eq!(got.len(), 1);
         assert!((got[0].amount - 4.10).abs() < 1e-9);
+        // A charge on the boundary two cycles share is the later cycle's,
+        // and only that one's.
+        let at = got[0].at;
+        let before = h.charges("spacexsi", "sx", "usage_limit", 0.0, at).unwrap();
+        let after = h.charges("spacexsi", "sx", "usage_limit", at, f64::INFINITY).unwrap();
+        assert_eq!((before.len(), after.len()), (0, 1));
     }
 
     #[test]
