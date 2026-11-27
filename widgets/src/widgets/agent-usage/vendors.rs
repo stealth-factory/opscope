@@ -499,7 +499,7 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         let mut lanes = match name {
             // One pool per quota group and window.
             "antigravity" => crate::antigravity::history_lanes(&s.antigravity),
-            // The bonus balance dated by its next grant's expiry.
+            // The summary's lanes, with each balance's grant expiry.
             "perplexity" => crate::perplexity::history_lanes(&s.perplexity),
             _ => lanes_of(name, s),
         };

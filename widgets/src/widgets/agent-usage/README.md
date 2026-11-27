@@ -2037,8 +2037,13 @@ goes:
   reading instead, broken on a day with no reading.
 - **Spend past the plan** gets its own chart too, one bar per cycle on the
   provider's own clock, in money or requests. **A balance** (Codex credits,
-  Devin and Droid's extra usage) has no cycle, so its chart is spend per
-  calendar month, and says so.
+  Devin and Droid's extra usage, Perplexity's bought and bonus credits) has
+  no cycle, so its chart is spend per calendar month, and says so. A
+  balance that falls across a grant's stated expiry - a Perplexity bonus
+  lapsing beside another - counts the fall as expired, not spent, up to
+  what the lapsed grant held; anything past that is still spend. Cursor's
+  prepaid credit, Codex, Devin and Droid state no grant expiries, so their
+  falls are all spend.
 
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one

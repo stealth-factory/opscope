@@ -96,8 +96,10 @@ pub enum MoveKind {
     Spend,
     /// It rose: a purchase or a grant.
     TopUp,
-    /// It fell across a grant's stated expiry. Not spend - though spend in
-    /// the same bracket cannot be told apart from it, and is not split out.
+    /// It fell across a grant's stated expiry, by no more than the grants
+    /// that left the balance's total held (see [`balance_moves`]). Not spend
+    /// - though spend in the same bracket, up to that amount, cannot be told
+    /// apart from it; what falls past it is spend, a move of its own.
     Expiry,
 }
 
@@ -277,34 +279,49 @@ fn expiries(samples: &[Sample]) -> Vec<f64> {
 /// Every move of a balance between consecutive readings with a level,
 /// oldest first: a fall is spend, a rise a top-up, a fall across one of
 /// `expiries` is expiry. A balance has no cycle, so nothing here rolls.
+///
+/// Expiry is capped at what the grants that expired held. A balance with a
+/// ceiling and `used` (Perplexity's pools, Cursor's prepaid) states the
+/// grants it holds as its `limit`, so a grant that lapsed takes its amount
+/// out of the limit: the limit's fall is the most the expiry can be, and
+/// the rest of the fall is spend, in a move of its own over the same
+/// bracket. A limit that did not fall lost no grant, and its fall is all
+/// spend. A balance with no ceiling (Codex credits, Devin, Droid) states
+/// only what is left, so nothing bounds an expiry but the fall itself.
 pub fn balance_moves(samples: &[Sample], expiries: &[f64]) -> Vec<Move> {
     let mut out = Vec::new();
-    let mut prev: Option<(f64, f64)> = None;
+    let mut prev: Option<(&Sample, f64)> = None;
     for s in samples {
         let Some(level) = level_of(s) else { continue };
-        if let Some((at, before)) = prev {
-            let d = level - before;
-            let kind = if d > EPS {
-                Some(MoveKind::TopUp)
-            } else if d < -EPS {
-                Some(if expiries.iter().any(|e| *e > at && *e <= s.at) {
-                    MoveKind::Expiry
-                } else {
-                    MoveKind::Spend
-                })
-            } else {
-                None
+        if let Some((p, before)) = prev {
+            let (at, d) = (p.at, level - before);
+            let mut push = |amount: f64, kind: MoveKind| {
+                if amount > EPS {
+                    out.push(Move {
+                        at_lo: at,
+                        at_hi: s.at,
+                        amount,
+                        kind,
+                    });
+                }
             };
-            if let Some(kind) = kind {
-                out.push(Move {
-                    at_lo: at,
-                    at_hi: s.at,
-                    amount: d.abs(),
-                    kind,
-                });
+            if d > EPS {
+                push(d, MoveKind::TopUp);
+            } else if d < -EPS {
+                let fall = -d;
+                let expired = if expiries.iter().any(|e| *e > at && *e <= s.at) {
+                    match (p.used, s.used, p.limit, s.limit) {
+                        (Some(_), Some(_), Some(lo), Some(hi)) => (lo - hi).clamp(0.0, fall),
+                        _ => fall,
+                    }
+                } else {
+                    0.0
+                };
+                push(expired, MoveKind::Expiry);
+                push(fall - expired, MoveKind::Spend);
             }
         }
-        prev = Some((s.at, level));
+        prev = Some((s, level));
     }
     out
 }
@@ -623,6 +640,7 @@ pub mod read {
     /// gives the (year, month) an instant falls in.
     pub fn month_totals(moves: &[Move], month_of: impl Fn(f64) -> (i32, u32)) -> Vec<MonthTotal> {
         let mut out: Vec<MonthTotal> = Vec::new();
+        let mut last: Option<(f64, f64)> = None;
         for m in moves {
             let (year, month) = month_of(m.at_hi);
             if out.last().is_none_or(|t| (t.year, t.month) != (year, month)) {
@@ -642,9 +660,11 @@ pub mod read {
                 MoveKind::TopUp => t.topped_up += m.amount,
                 MoveKind::Expiry => t.expired += m.amount,
             }
-            if month_of(m.at_lo) != (year, month) {
+            // One bracket split into expiry and spend straddles once.
+            if month_of(m.at_lo) != (year, month) && last != Some((m.at_lo, m.at_hi)) {
                 t.straddling += 1;
             }
+            last = Some((m.at_lo, m.at_hi));
         }
         out
     }
@@ -1148,6 +1168,19 @@ mod tests {
         };
         let m = balance_moves(&[prepaid(a, 20.0, 100.0), prepaid(a + H, 30.0, 100.0), prepaid(a + 2.0 * H, 30.0, 150.0)], &[]);
         assert_eq!(m.iter().map(|m| (m.kind, m.amount)).collect::<Vec<_>>(), vec![(MoveKind::Spend, 10.0), (MoveKind::TopUp, 50.0)]);
+        // Across an expiry, a ceiling balance's expiry is at most what left
+        // its limit: 300 -> 200 with 30 more used is 100 expired, 30 spent;
+        // a limit that held is no grant gone, so its fall is all spend.
+        let across = [a + 30.0 * 60.0];
+        let m = balance_moves(&[prepaid(a, 0.0, 300.0), prepaid(a + H, 30.0, 200.0)], &across);
+        assert_eq!(m.iter().map(|m| (m.kind, m.amount)).collect::<Vec<_>>(), vec![(MoveKind::Expiry, 100.0), (MoveKind::Spend, 30.0)]);
+        let m = balance_moves(&[prepaid(a, 0.0, 300.0), prepaid(a + H, 30.0, 300.0)], &across);
+        assert_eq!(m.iter().map(|m| (m.kind, m.amount)).collect::<Vec<_>>(), vec![(MoveKind::Spend, 30.0)]);
+        let split = month_totals(
+            &balance_moves(&[prepaid(a, 0.0, 300.0), prepaid(a + H, 30.0, 200.0)], &across),
+            |at| if at < a + 0.5 * H { (2026, 10) } else { (2026, 11) },
+        );
+        assert_eq!(split[0].straddling, 1, "one bracket, split in two, straddles once");
         // Totalled per calendar month, labelled as such.
         let totals = month_totals(&moves, |at| if at < a + 1.5 * H { (2026, 10) } else { (2026, 11) });
         assert_eq!(totals.len(), 2);
