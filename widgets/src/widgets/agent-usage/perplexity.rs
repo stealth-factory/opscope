@@ -104,6 +104,12 @@ pub struct Data {
     /// When the credits answer itself was fetched, which dates the credit
     /// lanes: the answers are cached apart and can be of different ages.
     credits_at: f64,
+    /// The same answer parsed as of `credits_at`, for the history. The tab
+    /// reads `credits`, parsed now, so a bonus lapsed since the fetch is
+    /// gone from it at once; the history dates its lanes by the fetch, and a
+    /// balance that only held after it would be a figure filed at a time it
+    /// was not true.
+    credits_read: Option<PerplexityCredits>,
     /// When the session answer that named the plan was fetched.
     plan_at: f64,
     /// When the weekly limit's reading was taken.
@@ -266,6 +272,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         // A bonus that has expired since the reading is gone now, not at
         // the next fetch.
         d.credits = parse_perplexity_credits(&text(got, "body"), now());
+        d.credits_read = parse_perplexity_credits(&text(got, "body"), d.credits_at);
     }
     let qkey = format!("{key}:quota");
     let mut refused = String::new();
@@ -493,6 +500,15 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// which takes its amount out of the pool, as expiry rather than spend
 /// (`history::overage::balance_moves`). The never-expires marker is no date.
 pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    // The credit lanes as they stood when fetched, never as reparsed now.
+    let as_read;
+    let d = match d.credits_read.as_ref() {
+        Some(c) if d.credits.as_ref() != Some(c) => {
+            as_read = Data { credits: Some(c.clone()), ..d.clone() };
+            &as_read
+        }
+        _ => d,
+    };
     let mut out = lanes(d);
     let Some(c) = d.credits.as_ref() else {
         return out;
@@ -560,6 +576,7 @@ impl Data {
         let read_at = now() - 60.0;
         Data {
             credits: parse_perplexity_credits(raw, read_at),
+            credits_read: parse_perplexity_credits(raw, read_at),
             read_at,
             credits_at: read_at,
             source: "config",
@@ -1594,6 +1611,32 @@ mod tests {
         assert_eq!(bonus.reset, Some(soon));
         // The tab's bar still keeps no clock.
         assert_eq!(lanes(&d).iter().find(|l| l.pool_key == "bonus").unwrap().reset, None);
+    }
+
+    #[test]
+    fn a_kept_answer_files_the_balance_it_held_when_fetched() {
+        // CodeRabbit's case: a credits answer kept through a failure is
+        // reparsed now, so a bonus that lapsed since drops out of it - and
+        // the history filed that lower balance at the original fetch time.
+        let read_at = now() - 3.0 * 3600.0;
+        let lapsed = now() - 3600.0;
+        let raw = format!(
+            r#"{{"credit_grants":[{{"type":"promotional","amount_cents":100,"expires_at_ts":{lapsed}}},
+            {{"type":"promotional","amount_cents":200,"expires_at_ts":{}}}],"total_usage_cents":0}}"#,
+            now() + 86400.0 * 30.0
+        );
+        let d = Data {
+            credits: parse_perplexity_credits(&raw, now()),
+            credits_read: parse_perplexity_credits(&raw, read_at),
+            read_at,
+            credits_at: read_at,
+            source: "config",
+            ..Data::default()
+        };
+        let bonus = |lanes: Vec<Lane>| lanes.into_iter().find(|l| l.pool_key == "bonus").and_then(|l| l.limit);
+        // The tab shows the lapse at once; the history keeps the fetch's.
+        assert_eq!(bonus(lanes(&d)), Some(200.0));
+        assert_eq!(bonus(history_lanes(&d)), Some(300.0));
     }
 
     #[test]
