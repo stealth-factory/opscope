@@ -1384,16 +1384,32 @@ fn compose_unified_plans(rows: Vec<PlanChange>) -> Vec<PlanChange> {
         now.entry(vendor.to_string()).or_insert_with(|| plan.to_string());
     }
     let mut out: Vec<PlanChange> = Vec::new();
-    for r in rows {
-        let (vendor, plan) = r.plan.split_once(':').unwrap_or(("", r.plan.as_str()));
-        now.insert(vendor.to_string(), plan.to_string());
+    // Both vendors read in one instant are stored a representable instant
+    // apart (`write_unified_plan`): they are one moment, composed once and
+    // dated by the true instant. Otherwise the sample at that instant saw
+    // only the first vendor's change, and the next closed the cycle again
+    // a few ulps later.
+    let same = |a: f64, b: f64| (b - a).abs() <= SAME_PLAN_INSTANT;
+    let mut i = 0;
+    while i < rows.len() {
+        let at = rows[i].at;
+        while i < rows.len() && same(at, rows[i].at) {
+            let (vendor, plan) = rows[i].plan.split_once(':').unwrap_or(("", rows[i].plan.as_str()));
+            now.insert(vendor.to_string(), plan.to_string());
+            i += 1;
+        }
         let joined = now.iter().map(|(v, p)| format!("{v}:{p}")).collect::<Vec<_>>().join(" ");
         if out.last().is_none_or(|l| l.plan != joined) {
-            out.push(PlanChange { at: r.at, plan: joined });
+            out.push(PlanChange { at, plan: joined });
         }
     }
     out
 }
+
+/// How far apart two vendors' plan rows of one instant can be stored: the
+/// few representable steps `write_unified_plan` moves the later one by.
+/// Far under any poll, so two real readings are never merged by it.
+const SAME_PLAN_INSTANT: f64 = 1e-3;
 
 /// Write the watch state when it differs from the latest one stored.
 fn write_watch(tx: &Transaction, account: i64, w: &WatchReading) -> Result<(), String> {
@@ -3229,6 +3245,35 @@ mod tests {
         assert!(
             cycles.iter().any(|c| c.end_reason == Some(EndReason::PlanChanged)),
             "the unified cycle did not close on the plan change"
+        );
+    }
+
+    #[test]
+    fn both_vendors_changing_tier_in_one_instant_is_one_plan_change_at_that_instant() {
+        // CodeRabbit's case: both tiers change at T. The second row is stored
+        // a representable instant after T, so the plan in force at T had
+        // only the first change and the next sample closed the cycle again
+        // a few ulps later.
+        let t: f64 = 20_000.0;
+        let next = f64::from_bits(t.to_bits() + 1);
+        let row = |at: f64, plan: &str| PlanChange { at, plan: plan.into() };
+        let rows = vec![
+            row(5000.0, "cursor:pro"),
+            row(f64::from_bits(5000f64.to_bits() + 1), "grok:supergrok"),
+            row(t, "cursor:ultra"),
+            row(next, "grok:heavy"),
+            // One vendor alone still changes the plan at its own instant.
+            row(30_000.0, "grok:supergrok"),
+        ];
+        let got = compose_unified_plans(rows);
+        let got: Vec<(f64, &str)> = got.iter().map(|p| (p.at, p.plan.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                (5000.0, "cursor:pro grok:supergrok"),
+                (t, "cursor:ultra grok:heavy"),
+                (30_000.0, "cursor:ultra grok:supergrok"),
+            ]
         );
     }
 
