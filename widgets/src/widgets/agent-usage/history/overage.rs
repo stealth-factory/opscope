@@ -146,6 +146,13 @@ fn rolled(p: &Sample, n: &Sample, t: &Thresholds) -> Option<Option<f64>> {
     let tol = tolerance(window);
     if let Some(r) = p.reset_at {
         let next = n.reset_at.filter(|nr| *nr > r + tol);
+        // The earlier reading was itself already past the reset it states,
+        // by the same rule that would roll at it, so it is in the cycle that
+        // followed and a later reading still stating that reset is in it
+        // too: a delta, not a second roll booking the whole spend again.
+        if next.is_none() && p.at >= r + tol {
+            return None;
+        }
         // No tolerance before the end: a reading inside the last hours of a
         // month that still states the same end is that month's, and booking
         // it as a roll would count its whole cumulative spend again.
@@ -923,6 +930,31 @@ mod tests {
 
     fn t() -> Thresholds {
         Thresholds::default()
+    }
+
+    #[test]
+    fn a_reset_still_stated_after_it_passed_rolls_once() {
+        // CodeRabbit's case: 40 before the stated reset T, then 41 and 42
+        // after it, both still stating T. Each pair read as a roll and
+        // booked its whole cumulative spend, 41 + 42 = 83, where the new
+        // cycle has spent 42.
+        let a = 1_000_000.0;
+        let r = a + MONTH;
+        let over = vec![
+            money(r - DAY, 40.0, 50.0, Some(r), Some(MONTH)),
+            money(r + DAY, 41.0, 50.0, Some(r), Some(MONTH)),
+            money(r + 2.0 * DAY, 42.0, 50.0, Some(r), Some(MONTH)),
+        ];
+        let out = spans(Role::Overage, &over, &[], &t());
+        let total: f64 = out.iter().map(|s| s.amount).sum();
+        assert!((total - 42.0).abs() < 1e-9, "{out:?}");
+        // A roll to a later stated reset still books the new cycle whole.
+        let over = vec![
+            money(r + DAY, 41.0, 50.0, Some(r), Some(MONTH)),
+            money(r + 2.0 * DAY, 3.0, 50.0, Some(r + MONTH), Some(MONTH)),
+        ];
+        let out = spans(Role::Overage, &over, &[], &t());
+        assert_eq!(out.iter().map(|s| s.amount).sum::<f64>(), 3.0);
     }
 
     #[test]
