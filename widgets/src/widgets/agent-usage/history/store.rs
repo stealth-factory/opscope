@@ -1039,6 +1039,10 @@ fn upsert_account(tx: &Transaction, provider: &str, key: &str, heading: &str, no
     .map_err(sql)
 }
 
+/// The pool row for `lane`, made or brought up to date. `last_seen` moves
+/// only on a live answer, and on every one, written or held back as
+/// unchanged: it is the liveness [`gone_at`] measures absence from, which
+/// the samples alone understate by up to the heartbeat.
 fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i64, String> {
     let (currency, exponent) = match &lane.unit {
         crate::shared::Unit::Money { currency, exponent } => (Some(currency.clone()), Some(*exponent)),
@@ -1049,7 +1053,8 @@ fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
          ON CONFLICT(account_id, pool_key) DO UPDATE SET label = excluded.label, role = excluded.role,
              unit = excluded.unit, currency = excluded.currency, exponent = excluded.exponent,
-             first_seen = MIN(first_seen, excluded.first_seen), last_seen = MAX(last_seen, excluded.last_seen)
+             first_seen = MIN(first_seen, excluded.first_seen),
+             last_seen = CASE WHEN ?9 THEN MAX(last_seen, excluded.last_seen) ELSE last_seen END
          RETURNING id",
         params![
             account,
@@ -1059,7 +1064,8 @@ fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i
             lane.unit.name(),
             currency,
             exponent,
-            at
+            at,
+            !lane.stale
         ],
         |r| r.get(0),
     )
@@ -1613,6 +1619,12 @@ fn gone_candidates(tx: &Transaction, account: i64, present: &[String]) -> Result
 /// readings alone, so a full re-fold reaches the same answer - and a pool
 /// that answers live again is judged again with that reading, so its cycle
 /// then closes as the fold reads the readings either side, on schedule.
+///
+/// The last live answer is the later of the last live sample and the
+/// pool's `last_seen`: an answer that changed nothing is held back from
+/// the samples until the hourly heartbeat, and measuring from the sample
+/// alone closed the cycle up to an hour early. `last_seen` is stored, not
+/// derived, so a full re-fold reads the same.
 fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, String> {
     // From the samples only, never from the cycles this fold is about to
     // replace: the pool's last live reading, its window and stated end.
@@ -1631,9 +1643,13 @@ fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, S
         )
         .optional()
         .map_err(sql)?;
-    let Some((last, pct, window, ends_at)) = last else {
+    let Some((sampled, pct, window, ends_at)) = last else {
         return Ok(None);
     };
+    let seen: f64 = tx
+        .query_row("SELECT last_seen FROM pool WHERE id = ?1", [pool], |r| r.get(0))
+        .map_err(sql)?;
+    let last = sampled.max(seen);
     let Some(window) = window.filter(|w| *w > 0.0) else {
         return Ok(None);
     };
@@ -2547,6 +2563,49 @@ mod tests {
         assert_eq!(c[0].end_reason, Some(EndReason::Scheduled));
         assert_eq!(c[0].closed_at, Some(end));
         assert!(c.last().unwrap().closed_at.is_none());
+    }
+
+    #[test]
+    fn absence_is_measured_from_the_last_live_answer_not_the_last_sample() {
+        // CodeRabbit's case: the five-hour pool answers unchanged half an
+        // hour after its last stored sample, so that answer is held back,
+        // and then it vanishes. Measured from the stored sample the cycle
+        // closed after four and a half hours of absence.
+        let p = temp("pool-gone-held");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 9.0 * H;
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        // Unchanged, so not written: the heartbeat is an hour.
+        h.record(&[two_pools(a + 0.5 * H, Some((40.0, end)), 10.5, false)], &t, a + 0.5 * H).unwrap();
+        let key = obs(vec![]).account_key();
+        assert_eq!(h.samples("codex", &key, "primary_window").unwrap().len(), 1);
+        let mut at = a + H;
+        while at <= a + 7.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c[0].end_reason, Some(EndReason::PoolGone));
+        assert_eq!(c[0].closed_at, Some(a + 0.5 * H + 5.0 * H), "a window after the last live answer");
+        let (stored, full) = stored_then_full(&mut h, "primary_window");
+        assert_eq!(stored, full);
+        // A cached copy of the pool is not an answer, and moves nothing.
+        let q = temp("pool-gone-cached");
+        let mut g = History::open(&q).unwrap();
+        g.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        let mut cached = two_pools(a + 0.5 * H, Some((40.0, end)), 10.5, false);
+        cached.lanes[0].stale = true;
+        cached.lanes[0].fetched_at = a + 0.5 * H;
+        g.record(&[cached], &t, a + 0.5 * H).unwrap();
+        let mut at = a + H;
+        while at <= a + 7.0 * H {
+            g.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let c = g.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c[0].closed_at, Some(a + 5.0 * H));
     }
 
     #[test]
