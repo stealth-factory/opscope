@@ -620,13 +620,34 @@ pub fn bank_events(banks: &[BankReading]) -> Vec<BankEvent> {
                     by_id.entry(identity(c)).or_default().push(j);
                 }
                 let mut claimed = vec![false; l2.len()];
-                for c in l1 {
-                    let now = by_id.get_mut(&identity(c)).and_then(|v| {
-                        let k = v.iter().position(|&j| l2[j].status == c.status).or((!v.is_empty()).then_some(0))?;
-                        let j = v.remove(k);
+                // Same status first, across the whole identity group, and
+                // only then the rest: claimed one credit at a time, the
+                // first held credit could take a credit another of the
+                // group still stood as, and `[available, spent]` against
+                // `[spent, expired]` read as a redemption or an expiry by
+                // the order the provider listed them in.
+                let mut now_of: Vec<Option<usize>> = vec![None; l1.len()];
+                for (i, c) in l1.iter().enumerate() {
+                    if let Some(v) = by_id.get_mut(&identity(c)) {
+                        if let Some(k) = v.iter().position(|&j| l2[j].status == c.status) {
+                            let j = v.remove(k);
+                            claimed[j] = true;
+                            now_of[i] = Some(j);
+                        }
+                    }
+                }
+                for (i, c) in l1.iter().enumerate() {
+                    if now_of[i].is_some() {
+                        continue;
+                    }
+                    if let Some(v) = by_id.get_mut(&identity(c)).filter(|v| !v.is_empty()) {
+                        let j = v.remove(0);
                         claimed[j] = true;
-                        Some(&l2[j])
-                    });
+                        now_of[i] = Some(j);
+                    }
+                }
+                for (i, c) in l1.iter().enumerate() {
+                    let now = now_of[i].map(|j| &l2[j]);
                     if !is_held(&c.status) {
                         continue;
                     }
@@ -920,6 +941,16 @@ mod tests {
         // A count that leaps is one row with the whole difference.
         let up = bank_events(&[count_only(1.0, 0), count_only(2.0, 100_000)]);
         assert_eq!((up[0].kind, up[0].count), (BankEventKind::Granted, 100_000));
+        // CodeRabbit's later case: [available, spent] against [spent,
+        // expired]. The spent credit is still the spent one, so the held one
+        // expired, in either order - it read as a redemption when the
+        // second list began with `spent`, and a redemption can bank a reset.
+        let before = bank(A + H, vec![anon("available"), anon("spent")]);
+        for after in [vec![anon("spent"), anon("expired")], vec![anon("expired"), anon("spent")]] {
+            let ev = bank_events(&[before.clone(), bank(A + 2.0 * H, after)]);
+            let kinds: Vec<_> = ev.iter().map(|e| (e.kind, e.count)).collect();
+            assert_eq!(kinds, vec![(BankEventKind::Expired, 1)]);
+        }
     }
 
     #[test]
