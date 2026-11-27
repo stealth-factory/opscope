@@ -442,8 +442,16 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
     } else {
         loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]))
     };
+    // With no ceiling the state carries no scope, so it holds this account's
+    // own spend: a team's total there would be filed as the member's. An
+    // absent `individualUsed` beside a stated team spend is proto3's zero.
+    let own = if shared {
+        loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]).map(|_| 0.0))
+    } else {
+        used
+    };
     if hard["noUsageBasedAllowed"].as_bool() == Some(true) {
-        return ExtraState::Disabled { used: used.unwrap_or(0.0) };
+        return ExtraState::Disabled { used: own.unwrap_or(0.0) };
     }
     // INT32_MAX is how GetHardLimit says no limit is set, so it is the
     // answer to "is there a cap" rather than the size of one.
@@ -469,9 +477,9 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
     // Cursor said outright that no limit is set. No spend beside it is
     // proto3 omitting a zero, the same reading a stated cap gets above.
     if no_limit {
-        return ExtraState::Unlimited { used: used.unwrap_or(0.0) };
+        return ExtraState::Unlimited { used: own.unwrap_or(0.0) };
     }
-    match used {
+    match own {
         // A spend, no cap from either call, and nothing saying extra usage
         // is forbidden: uncapped. Assumed, not measured.
         Some(used) => ExtraState::Unlimited { used },
@@ -4413,6 +4421,25 @@ mod tests {
         assert_eq!((got[0].pool_key.as_str(), got[0].used), ("extra", Some(9.64)));
         // A capped month is the summary's lane already, and is not doubled.
         assert!(history_lanes(&unified_data(true)).is_empty());
+    }
+
+    #[test]
+    fn a_team_s_spend_with_no_ceiling_is_not_filed_as_the_member_s() {
+        // CodeRabbit's case: a team pool reporting $40 in all and $9.64 of
+        // this member's, uncapped or switched off. The history recorded the
+        // $40 as the signed-in account's extra spend.
+        for hard in [serde_json::json!({"hardLimit": "2147483647"}), serde_json::json!({"noUsageBasedAllowed": true})] {
+            let mut v = measured();
+            v["spendLimitUsage"] = serde_json::json!({"totalSpend": 4000, "individualUsed": 964, "limitType": "team"});
+            let d = Data { live: Some(v.clone()), hard: Some(hard.clone()), fetched_at: 2_000.0, ..Data::default() };
+            let got = history_lanes(&d);
+            assert_eq!(got.len(), 1, "{hard}");
+            assert_eq!(got[0].used, Some(9.64), "{hard}");
+            // No personal figure beside the team's is proto3's zero.
+            v["spendLimitUsage"] = serde_json::json!({"totalSpend": 4000, "limitType": "team"});
+            let d = Data { live: Some(v), hard: Some(hard.clone()), fetched_at: 2_000.0, ..Data::default() };
+            assert_eq!(history_lanes(&d)[0].used, Some(0.0), "{hard}");
+        }
     }
 
     #[test]
