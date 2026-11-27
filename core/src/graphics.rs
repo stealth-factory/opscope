@@ -2135,6 +2135,26 @@ fn column_cell(column: &Column, top: f64, bottom: f64, peak: f64, floor: bool, n
             let from = from.clamp(0.0, peak);
             let hi = (from + height.max(0.0)).min(peak);
             if hi > bottom && from < top && hi > from {
+                // A band starting inside this cell on a base that reaches
+                // it is one stack here: the base's parts cut at `from`,
+                // and the band on top, so the base keeps its share.
+                if let (Column::Stack { parts, .. }, true) = (base.as_ref(), from > bottom) {
+                    let mut cut = Vec::new();
+                    let mut reach = 0.0f64;
+                    for (v, c) in parts {
+                        let v = if v.is_finite() { v.max(0.0) } else { 0.0 };
+                        let v = v.min(from - reach);
+                        if v > 0.0 {
+                            cut.push((v, c.clone()));
+                            reach += v;
+                        }
+                    }
+                    if reach >= from {
+                        cut.push((hi - from, colour.clone()));
+                        let joined = Column::Stack { parts: cut, open: None };
+                        return column_cell(&joined, top, bottom, hi, floor, no_colour);
+                    }
+                }
                 // Where the band ends in this cell, as a stack's top shows.
                 let k = (((hi.min(top) - bottom) / (top - bottom) * 8.0).round() as usize).clamp(1, 8);
                 return (colour.clone(), super::EIGHTHS[k]);
@@ -3577,6 +3597,26 @@ mod tests {
         let top_of = |col: usize| (0..3 * CELL_H).find(|y| alpha_at(&px, w, col * CELL_W + CELL_W / 2, *y) != 0);
         assert_eq!(top_of(0), top_of(1));
         assert_eq!(top_of(1), top_of(2));
+    }
+
+    #[test]
+    fn a_band_starting_inside_a_cell_keeps_the_base_below_it() {
+        let low = super::super::rgb(220, 90, 80);
+        let money = super::super::rgb(60, 160, 240);
+        // CodeRabbit's case: 0-100 in two rows, a base of 75 and a band
+        // from 75 to 100. The upper cell is the base's lower half on the
+        // band's colour, not a full cell of band.
+        let columns = vec![Column::Band {
+            base: Box::new(Column::Stack { parts: vec![(75.0, low.clone())], open: None }),
+            from: 75.0,
+            height: 25.0,
+            colour: money.clone(),
+        }];
+        let plot = Plot::stacked_columns(0, 0, &columns, 2, 100.0);
+        let top = &plot.text_row(0)[0];
+        assert_eq!(top.1, "▄");
+        assert!(top.0.starts_with(&low) && top.0.contains("48;2;60;160;240"), "{top:?}");
+        assert_eq!(plot.text_row(1)[0], (low.clone(), "█".to_string()));
     }
 
     #[test]
