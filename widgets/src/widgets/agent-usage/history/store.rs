@@ -1661,6 +1661,42 @@ fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, S
     Ok(Some(ends_at.filter(|e| *e > last && *e < until).unwrap_or(until)))
 }
 
+/// Whether the reading that closed `c` - the first after its last
+/// observation - is in a rolling stretch, as [`fold::rolling_mask`] reads
+/// the readings from it on. A run is established, if ever, by the first
+/// reading more than two tolerances after its start, so only the readings
+/// up to that one are read.
+fn closed_by_rolling(tx: &Transaction, pool: i64, c: &Cycle, t: &Thresholds) -> Result<bool, String> {
+    let Some(last) = c.last_obs_at else {
+        return Ok(false);
+    };
+    let closing: Option<Sample> = tx
+        .query_row(
+            &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at > ?2 ORDER BY at LIMIT 1"),
+            params![pool, last],
+            sample_row,
+        )
+        .optional()
+        .map_err(sql)?;
+    let Some(closing) = closing else {
+        return Ok(false);
+    };
+    if closing.reset_at.is_none() {
+        return Ok(false);
+    }
+    let reach = closing.at + 2.0 * fold::tolerance(closing.window_secs);
+    let mut st = tx
+        .prepare(&format!(
+            "SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at >= ?2
+               AND at <= (SELECT COALESCE(MIN(at), ?3) FROM sample WHERE pool_id = ?1 AND at > ?3)
+             ORDER BY at"
+        ))
+        .map_err(sql)?;
+    let rows = st.query_map(params![pool, closing.at, reach], sample_row).map_err(sql)?;
+    let run: Vec<Sample> = rows.collect::<Result<_, _>>().map_err(sql)?;
+    Ok(fold::rolling_mask(&run, t.near_zero_pct, None).first().copied().unwrap_or(false))
+}
+
 /// The pool's latest cycle, when it is undated and still open and nothing
 /// after its last observation states an instant, as a [`fold::Resume`] to
 /// fold on from: what an append to it needs, without its earlier readings.
@@ -1847,6 +1883,36 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
     let prev: Option<Cycle> = match kept {
         Some(ordinal) => load_cycles_from(tx, pool, ordinal)?.into_iter().next().map(|(_, c)| c),
         None => None,
+    };
+    // A kept cycle is kept for the reading that closed it. When that
+    // reading has since become part of a rolling stretch - its run only
+    // confirmed by readings that came later - a fresh fold would not see
+    // it, and the cycle it closed may not close at all: fold it again, from
+    // the closed cycle before it. One step back, not the whole history: a
+    // pool that went rolling for good after its last fixed cycle would
+    // otherwise fold from its first reading on every write.
+    let prev = match prev {
+        Some(c) if closed_by_rolling(tx, pool, &c, t)? => {
+            let before: Option<i64> = tx
+                .query_row(
+                    "SELECT ordinal FROM cycle
+                      WHERE pool_id = ?1 AND closed_at IS NOT NULL AND last_obs_at IS NOT NULL AND ordinal < ?2
+                      ORDER BY ordinal DESC LIMIT 1",
+                    params![pool, c.ordinal],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sql)?;
+            let earlier = match before {
+                Some(o) => load_cycles_from(tx, pool, o)?.into_iter().next().map(|(_, c)| c),
+                None => None,
+            };
+            match earlier {
+                Some(e) if !closed_by_rolling(tx, pool, &e, t)? => Some(e),
+                _ => None,
+            }
+        }
+        other => other,
     };
     let keep_ordinal = prev.as_ref().map_or(0, |c| c.ordinal as i64);
     let kept_id: Option<i64> = tx
@@ -2973,6 +3039,27 @@ mod tests {
         refold_pool(&tx, pool, None, &t).unwrap();
         tx.commit().unwrap();
         (stored, read(h))
+    }
+
+    #[test]
+    fn a_kept_cycle_closed_by_a_reading_that_turns_out_rolling_is_folded_again() {
+        // CodeRabbit's case: one fixed weekly reading before E, then five in
+        // use after it, each stating a reset a week after its own fetch, at
+        // 10, 70, 130, 190 and 250 minutes. The first closed the fixed cycle
+        // at E; only the fifth confirms the run as rolling, and by then the
+        // checkpoint kept the close a fresh fold no longer makes.
+        let p = temp("kept-rolling");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let e = a + WEEK;
+        h.record(&[obs(vec![lane("secondary_window", 40.0, e - 2.0 * H, e, WEEK)])], &t, e - 2.0 * H).unwrap();
+        for (k, mins) in [10.0, 70.0, 130.0, 190.0, 250.0].into_iter().enumerate() {
+            let at = e + mins * 60.0;
+            h.record(&[obs(vec![lane("secondary_window", 41.0 + k as f64, at, at + WEEK, WEEK)])], &t, at).unwrap();
+        }
+        let (stored, full) = stored_then_full(&mut h, "secondary_window");
+        assert_eq!(stored.0, full.0, "{:#?}\n{:#?}", stored.0, full.0);
     }
 
     #[test]
