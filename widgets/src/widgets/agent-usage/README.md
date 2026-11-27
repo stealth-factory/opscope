@@ -2026,8 +2026,9 @@ goes:
   ended. A thin `│` divides two plans, and the lines name them.
 - **The lines under each chart say everything it shows**, so text mode and a
   reader who cannot see the colours lose nothing: the average share of an
-  allowance over the closed cycles shown (cut-short cycles left out and
-  counted, and "at least" where a lower bound is in it), how many hit 100%
+  allowance over the closed cycles shown (cut-short cycles, and cycles a plan
+  change closed before their end, left out and counted, and "at least"
+  where a lower bound is in it), how many hit 100%
   and on which day of the cycle (hours in, for a 5-hour window), the peak and
   the resets in it, resets by kind, banked resets that expired unused, the
   spend past the allowance (each stretch of spend counted once, however many

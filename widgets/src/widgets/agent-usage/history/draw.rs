@@ -305,6 +305,9 @@ pub struct Summary {
     pub averaged: usize,
     /// Cut short by a restarted reset, left out of the average (§5.7).
     pub cut_short: usize,
+    /// Closed by a plan or limit change before their scheduled end: part
+    /// of a period, so left out of the average as a cut-short one is.
+    pub ended_early: usize,
     /// Reached 100%, and the median time from the cycle's start to that.
     pub hit: usize,
     pub median_to_hit: Option<f64>,
@@ -339,6 +342,18 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
 }
 
+/// Closed by a plan or limit change before the end it was scheduled for:
+/// a partial period, which is no more comparable with a whole one than a
+/// cycle a restart cut short. One whose scheduled end is unknown is not
+/// called partial, since nothing says it was.
+fn ended_early(c: &Cycle) -> bool {
+    matches!(c.end_reason, Some(EndReason::PlanChanged | EndReason::LimitChanged))
+        && match (c.closed_at, c.ends_at) {
+            (Some(closed), Some(end)) => closed < end - super::fold::tolerance(c.window_secs),
+            _ => false,
+        }
+}
+
 /// The figures the text lines carry, over `bars` (the cycles shown).
 pub fn summarise(bars: &[&CycleBar], expired: &[(f64, u32)]) -> Summary {
     let mut s = Summary {
@@ -350,10 +365,11 @@ pub fn summarise(bars: &[&CycleBar], expired: &[(f64, u32)]) -> Summary {
     let full: Vec<&&CycleBar> = seen
         .iter()
         .copied()
-        .filter(|b| b.cycle.closed_at.is_some() && !b.cycle.cut_short())
+        .filter(|b| b.cycle.closed_at.is_some() && !b.cycle.cut_short() && !ended_early(&b.cycle))
         .filter(|b| consumed(&b.cycle).is_some())
         .collect();
     s.cut_short = seen.iter().filter(|b| b.cycle.cut_short()).count();
+    s.ended_early = seen.iter().filter(|b| ended_early(&b.cycle)).count();
     s.averaged = full.len();
     if !full.is_empty() {
         let sum: f64 = full.iter().filter_map(|b| consumed(&b.cycle)).sum();
@@ -453,6 +469,9 @@ pub fn summary_lines(s: &Summary) -> Vec<String> {
             let mut left = vec![plural(s.averaged, "closed", "closed")];
             if s.cut_short > 0 {
                 left.push(format!("{} cut short left out", s.cut_short));
+            }
+            if s.ended_early > 0 {
+                left.push(format!("{} ended early by a plan change left out", s.ended_early));
             }
             first.push(format!(
                 "avg {}{} of allowance ({})",
@@ -1221,6 +1240,26 @@ mod tests {
             let cells: String = chart.text_row(r).iter().map(|(_, t)| t.as_str()).collect();
             assert_eq!(cells.chars().nth(10), Some('│'), "row {r}: {cells:?}");
         }
+    }
+
+    #[test]
+    fn a_cycle_a_plan_change_closed_early_is_left_out_of_the_average() {
+        // CodeRabbit's case: only a restart counted as cut short, so a
+        // cycle a plan change closed three days in was averaged with whole
+        // ones and pulled the figure down.
+        let mut bars = weekly();
+        bars[9].cycle.closed_at = Some(bars[9].cycle.starts_at + 3.0 * DAY);
+        bars[9].cycle.consumed_pct = Some(5.0);
+        let refs: Vec<&CycleBar> = bars.iter().collect();
+        let s = summarise(&refs, &[]);
+        assert_eq!((s.averaged, s.ended_early), (8, 1));
+        let expect: f64 = [43.0, 100.0, 49.0, 140.0, 55.0, 64.0, 63.0, 73.0].iter().sum::<f64>() / 8.0;
+        assert!((s.avg.unwrap().0 - expect).abs() < 1e-9);
+        assert!(summary_lines(&s)[0].contains("(8 closed; 1 cut short left out; 1 ended early by a plan change left out)"));
+        // Closed by a plan change on its scheduled end, it ran its length.
+        let bars = weekly();
+        let refs: Vec<&CycleBar> = bars.iter().collect();
+        assert_eq!(summarise(&refs, &[]).ended_early, 0);
     }
 
     #[test]
