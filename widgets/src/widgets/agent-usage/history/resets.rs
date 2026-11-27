@@ -591,6 +591,15 @@ fn is_spent(status: &str) -> bool {
     matches!(status, "spent" | "redeemed" | "used" | "consumed")
 }
 
+/// A status by what it says about the credit: the spent ones are one.
+fn category(status: &str) -> &str {
+    if is_spent(status) {
+        "spent"
+    } else {
+        status
+    }
+}
+
 /// A credit still held: neither used nor expired.
 fn is_held(status: &str) -> bool {
     !is_spent(status) && status != "expired"
@@ -653,7 +662,7 @@ pub fn bank_events(banks: &[BankReading]) -> Vec<BankEvent> {
                 let mut now_of: Vec<Option<usize>> = vec![None; l1.len()];
                 for (i, c) in l1.iter().enumerate() {
                     if let Some(v) = by_id.get_mut(&identity(c)) {
-                        if let Some(k) = v.iter().position(|&j| l2[j].status == c.status) {
+                        if let Some(k) = v.iter().position(|&j| category(&l2[j].status) == category(&c.status)) {
                             let j = v.remove(k);
                             claimed[j] = true;
                             now_of[i] = Some(j);
@@ -971,6 +980,13 @@ mod tests {
         // second list began with `spent`, and a redemption can bank a reset.
         let before = bank(A + H, vec![anon("available"), anon("spent")]);
         for after in [vec![anon("spent"), anon("expired")], vec![anon("expired"), anon("spent")]] {
+            let ev = bank_events(&[before.clone(), bank(A + 2.0 * H, after)]);
+            let kinds: Vec<_> = ev.iter().map(|e| (e.kind, e.count)).collect();
+            assert_eq!(kinds, vec![(BankEventKind::Expired, 1)]);
+        }
+        // And again where the second list calls the spent one `redeemed`:
+        // the same state in another word, matched as the same.
+        for after in [vec![anon("redeemed"), anon("expired")], vec![anon("expired"), anon("redeemed")]] {
             let ev = bank_events(&[before.clone(), bank(A + 2.0 * H, after)]);
             let kinds: Vec<_> = ev.iter().map(|e| (e.kind, e.count)).collect();
             assert_eq!(kinds, vec![(BankEventKind::Expired, 1)]);

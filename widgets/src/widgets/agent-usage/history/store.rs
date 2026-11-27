@@ -962,6 +962,17 @@ fn refold_if_stale(tx: &Transaction, t: &Thresholds) -> Result<(), String> {
         let rows = st.query_map([], |r| r.get(0)).map_err(sql)?;
         rows.collect::<Result<_, _>>().map_err(sql)?
     };
+    // The bank events first: they are the detector's reading of the stored
+    // inventories too, and the write path rebuilds them only when an
+    // inventory changes.
+    let accounts: Vec<i64> = {
+        let mut st = tx.prepare("SELECT DISTINCT account_id FROM bank_sample ORDER BY account_id").map_err(sql)?;
+        let rows = st.query_map([], |r| r.get(0)).map_err(sql)?;
+        rows.collect::<Result<_, _>>().map_err(sql)?
+    };
+    for account in accounts {
+        rebuild_bank_events(tx, account)?;
+    }
     for pool in pools {
         refold_pool(tx, pool, None, t)?;
     }
@@ -2968,6 +2979,43 @@ mod tests {
             .cycles("codex", &obs(vec![]).account_key(), "secondary_window")
             .unwrap();
         assert_eq!(c[0].peak_pct, Some(30.0));
+    }
+
+    #[test]
+    fn a_changed_detector_version_rebuilds_the_bank_events_too() {
+        // CodeRabbit's case: the upgrade refolded every pool and left the
+        // bank events an older detector classified, which the write path
+        // rebuilds only when an inventory changes.
+        let p = temp("detector-bank");
+        let a = 1_000_000.0;
+        {
+            let mut h = History::open(&p).unwrap();
+            let mut o = obs(vec![lane("secondary_window", 30.0, a + H, a + WEEK, WEEK)]);
+            o.bank = Some(BankReading {
+                at: a + H,
+                left: 1,
+                credits: Some(vec![super::super::RawCredit {
+                    id: Some("c1".into()),
+                    status: "available".into(),
+                    expires_at: Some(9e9),
+                }]),
+            });
+            h.record(std::slice::from_ref(&o), &Thresholds::default(), a + H).unwrap();
+            assert_eq!(h.count("bank_event"), 0);
+            // An older detector's reading of the same inventory.
+            h.conn
+                .execute(
+                    "INSERT INTO bank_event(account_id, at_lo, at_hi, kind, count, expires_at)
+                     SELECT account_id, at - 60.0, at, 'redeemed', 1, NULL FROM bank_sample",
+                    [],
+                )
+                .unwrap();
+            h.conn
+                .execute("UPDATE meta SET v = '0' WHERE k = 'detector_version'", [])
+                .unwrap();
+        }
+        let h = History::open(&p).unwrap();
+        assert_eq!(h.count("bank_event"), 0);
     }
 
     #[test]
