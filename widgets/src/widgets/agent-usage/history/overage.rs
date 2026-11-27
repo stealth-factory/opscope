@@ -183,17 +183,21 @@ fn rolled(p: &Sample, n: &Sample, t: &Thresholds) -> Option<Option<f64>> {
 /// The linked included pools at or above [`EXHAUSTED_PCT`] at some reading
 /// in force during `lo..hi`: the last one at or before `lo` (unless its own
 /// window had already closed by then), and every one inside the bracket.
+///
+/// The samples are in time order, so both ends are found by bisection: a
+/// full refold asks this once per spend delta, and scanning every reading
+/// each time made it deltas times readings.
 fn exhausted_during(included: &[Included], lo: f64, hi: f64) -> Vec<i64> {
     let mut out: Vec<i64> = included
         .iter()
         .filter(|inc| {
-            let before = inc
-                .samples
-                .iter()
-                .rev()
-                .find(|s| s.at <= lo)
+            let first_after = inc.samples.partition_point(|s| s.at <= lo);
+            let past = inc.samples.partition_point(|s| s.at <= hi);
+            let before = first_after
+                .checked_sub(1)
+                .map(|i| &inc.samples[i])
                 .filter(|s| s.reset_at.is_none_or(|r| r > lo));
-            let inside = inc.samples.iter().filter(|s| s.at > lo && s.at <= hi);
+            let inside = inc.samples[first_after..past.max(first_after)].iter();
             before
                 .into_iter()
                 .chain(inside)
