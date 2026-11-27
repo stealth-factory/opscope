@@ -1043,6 +1043,10 @@ fn after_end(
             let tol = tolerance(Some(w));
             let n = ((ns - end) / w).round();
             let aligned = n >= 0.0 && (ns - (end + n * w)).abs() <= tol;
+            // Aligned within the tolerance is one boundary: the new cycle
+            // starts where the one before it (or the last hollow one) ended,
+            // not a minute either side of it, or two adjacent cycles would
+            // overlap - or leave a sliver - by the server's rounding.
             if aligned && n >= 1.0 && model_before == CycleModel::Contiguous {
                 // Whole windows passed unseen on a contiguous pool.
                 for k in 0..n as u32 {
@@ -1050,9 +1054,9 @@ fn after_end(
                     observed_model.push(true);
                     *ordinal += 1;
                 }
-                (ns, CycleModel::Contiguous, StartSource::Server)
+                (end + n * w, CycleModel::Contiguous, StartSource::Server)
             } else if aligned && n == 0.0 {
-                (ns, CycleModel::Contiguous, StartSource::Server)
+                (end, CycleModel::Contiguous, StartSource::Server)
             } else if ns > end + tol {
                 (ns, CycleModel::UseAnchored, StartSource::Server)
             } else {
@@ -1316,6 +1320,31 @@ mod tests {
         assert!(!c.end_is_lower_bound);
         assert_eq!(out.cycles[1].starts_at, e);
         assert_eq!(out.cycles[1].peak_pct, Some(1.0));
+    }
+
+    #[test]
+    fn adjacent_cycles_share_one_boundary_when_the_next_start_is_a_minute_off() {
+        // CodeRabbit's case: a five-hour cycle closes at E and the next
+        // reading implies a start of E - 60 s. Within the tolerance that is
+        // the same boundary, and the stored cycles overlapped by a minute.
+        let a = 1_000_000.0;
+        let w = 5.0 * H;
+        let e = a + w;
+        for off in [-60.0, 60.0] {
+            let samples = vec![s(a + H, 40.0, Some(e), Some(w)), s(e + H, 5.0, Some(e + w + off), Some(w))];
+            let out = run(&samples);
+            assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+            assert_eq!(out.cycles[0].closed_at, Some(e));
+            assert_eq!(out.cycles[1].starts_at, e, "offset {off}");
+            assert_eq!(out.cycles[1].ends_at, Some(e + w + off), "the stated end is kept");
+        }
+        // Whole windows unseen in between: the new cycle starts where the
+        // last hollow one ended.
+        let samples = vec![s(a + H, 40.0, Some(e), Some(w)), s(e + 2.0 * w + H, 5.0, Some(e + 3.0 * w - 60.0), Some(w))];
+        let out = run(&samples);
+        let last = out.cycles.last().unwrap();
+        let hollow = &out.cycles[out.cycles.len() - 2];
+        assert_eq!(hollow.ends_at, Some(last.starts_at));
     }
 
     #[test]
