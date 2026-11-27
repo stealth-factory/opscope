@@ -650,6 +650,30 @@ pub mod read {
         pub straddling: usize,
     }
 
+    /// [`month_totals`], with a month of nothing for each month in which
+    /// the balance was read (`read_at`) and did not move, oldest first. A
+    /// funded balance that stood still is a reading that nothing was spent;
+    /// a month nobody read stays out rather than reading as zero.
+    pub fn read_month_totals(moves: &[Move], read_at: &[f64], month_of: impl Fn(f64) -> (i32, u32)) -> Vec<MonthTotal> {
+        let mut out = month_totals(moves, &month_of);
+        for at in read_at {
+            let (year, month) = month_of(*at);
+            if !out.iter().any(|t| (t.year, t.month) == (year, month)) {
+                out.push(MonthTotal {
+                    year,
+                    month,
+                    label: format!("{} {year} (calendar month)", month_name(month)),
+                    spent: 0.0,
+                    topped_up: 0.0,
+                    expired: 0.0,
+                    straddling: 0,
+                });
+            }
+        }
+        out.sort_by_key(|t| (t.year, t.month));
+        out
+    }
+
     /// The moves of a balance totalled per month, oldest first. `month_of`
     /// gives the (year, month) an instant falls in.
     pub fn month_totals(moves: &[Move], month_of: impl Fn(f64) -> (i32, u32)) -> Vec<MonthTotal> {
@@ -865,7 +889,8 @@ pub mod read {
         /// balance has no cycle of its own.
         pub fn balance_months(&self, provider: &str, account_key: &str, pool_key: &str) -> Result<Vec<MonthTotal>, String> {
             let samples = self.samples(provider, account_key, pool_key)?;
-            Ok(month_totals(&balance_moves(&samples, &expiries(&samples)), local_month))
+            let read: Vec<f64> = samples.iter().filter(|s| super::level_of(s).is_some()).map(|s| s.at).collect();
+            Ok(read_month_totals(&balance_moves(&samples, &expiries(&samples)), &read, local_month))
         }
 
         /// **The exact per-request charges** of an overage pool from `from`
@@ -1719,5 +1744,41 @@ mod tests {
         let topped: f64 = months.iter().map(|m| m.topped_up).sum();
         assert_eq!((spent, topped), (10.0, 50.0));
         assert!(months[0].label.ends_with("(calendar month)"));
+    }
+
+    #[test]
+    fn a_funded_balance_that_did_not_move_still_reads_per_month() {
+        // CodeRabbit's case: 40 credits in one month and 40 in the next made
+        // no move, so no month, and the chart that promised to show a
+        // balance standing still was dropped.
+        let p = temp("balance-still");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let credits = |left: f64, at: f64| Lane {
+            label: "credits".into(),
+            pct: f64::NAN,
+            pool_key: "credits".into(),
+            unit: Unit::Credits,
+            role: PoolRole::Balance,
+            limit: Some(left),
+            fetched_at: at,
+            ..Lane::default()
+        };
+        let codex = |lanes: Vec<Lane>| Observation {
+            provider: "codex".into(),
+            account_id: "codex-still".into(),
+            lanes,
+            ..Observation::default()
+        };
+        h.record(&[codex(vec![credits(40.0, a)])], &t(), a).unwrap();
+        h.record(&[codex(vec![credits(40.0, a + 40.0 * DAY)])], &t(), a + 40.0 * DAY).unwrap();
+        let key = codex(vec![]).account_key();
+        let months = h.balance_months("codex", &key, "credits").unwrap();
+        assert_eq!(months.len(), 2, "{months:?}");
+        assert!(months.iter().all(|m| m.spent == 0.0 && m.topped_up == 0.0));
+        // Only the months that were read: one between them nobody read is
+        // not a zero.
+        let gap = read_month_totals(&[], &[a, a + 70.0 * DAY], |at| (2026, 1 + ((at - a) / (30.0 * DAY)) as u32));
+        assert_eq!(gap.iter().map(|m| m.month).collect::<Vec<_>>(), vec![1, 3]);
     }
 }
