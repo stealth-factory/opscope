@@ -625,6 +625,15 @@ impl History {
                 if let Some(at) = write_plan(&tx, account, p)? {
                     account_refold.push((account, at));
                 }
+                // The unified account's cycles are the ones drawn, so its
+                // fold needs the plan too, or a tier change that leaves the
+                // window alone reads there as a reset.
+                if let Some(sk) = &spacexsi_account {
+                    let unified = upsert_account(&tx, "spacexsi", sk, SPACEXSI_HEADING, now)?;
+                    if let Some(at) = write_unified_plan(&tx, unified, &o.provider, p)? {
+                        account_refold.push((unified, at));
+                    }
+                }
             }
             if let Some(w) = &o.watch {
                 write_watch(&tx, account, w)?;
@@ -1300,6 +1309,76 @@ fn write_plan(tx: &Transaction, account: i64, p: &super::PlanReading) -> Result<
     Ok(Some(p.at))
 }
 
+/// Write a vendor's plan reading under the unified SpaceXSI account, as
+/// `vendor:plan`. Cursor and Grok both report there, each its own tier, so
+/// a reading is compared with the latest of the same vendor only: compared
+/// with the latest row of either, the two would take turns and every pass
+/// would look like a plan change. [`load_plans`] puts them back together.
+fn write_unified_plan(
+    tx: &Transaction,
+    account: i64,
+    vendor: &str,
+    p: &super::PlanReading,
+) -> Result<Option<f64>, String> {
+    if p.plan.is_empty() {
+        return Ok(None);
+    }
+    let prefix = format!("{vendor}:");
+    let last: Option<(f64, String)> = tx
+        .query_row(
+            "SELECT at, plan FROM plan_sample WHERE account_id = ?1 AND substr(plan, 1, length(?2)) = ?2
+             ORDER BY at DESC LIMIT 1",
+            params![account, prefix],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    let plan = format!("{prefix}{}", p.plan);
+    if last.as_ref().is_some_and(|(at, was)| *was == plan || p.at <= *at) {
+        return Ok(None);
+    }
+    // Both vendors can be read in the same instant, and the table holds one
+    // row per moment: the later of the two goes in the next representable
+    // instant, which orders it and moves nothing a reading can see.
+    let mut at = p.at;
+    for _ in 0..4 {
+        let wrote = tx
+            .execute(
+                "INSERT OR IGNORE INTO plan_sample(account_id, at, plan) VALUES (?1, ?2, ?3)",
+                params![account, at, plan],
+            )
+            .map_err(sql)?;
+        if wrote > 0 {
+            return Ok(Some(at));
+        }
+        at = f64::from_bits(at.to_bits() + 1);
+    }
+    Ok(None)
+}
+
+/// Compose the unified account's `vendor:plan` rows into one plan per
+/// moment: every vendor's latest tier so far, so a row from one vendor that
+/// leaves its own tier alone is no change, and either vendor's change is.
+fn compose_unified_plans(rows: Vec<PlanChange>) -> Vec<PlanChange> {
+    // Each vendor starts at its first tier, so its first reading is the
+    // start of what is known about it rather than a change.
+    let mut now: std::collections::BTreeMap<String, String> = Default::default();
+    for r in &rows {
+        let (vendor, plan) = r.plan.split_once(':').unwrap_or(("", r.plan.as_str()));
+        now.entry(vendor.to_string()).or_insert_with(|| plan.to_string());
+    }
+    let mut out: Vec<PlanChange> = Vec::new();
+    for r in rows {
+        let (vendor, plan) = r.plan.split_once(':').unwrap_or(("", r.plan.as_str()));
+        now.insert(vendor.to_string(), plan.to_string());
+        let joined = now.iter().map(|(v, p)| format!("{v}:{p}")).collect::<Vec<_>>().join(" ");
+        if out.last().is_none_or(|l| l.plan != joined) {
+            out.push(PlanChange { at: r.at, plan: joined });
+        }
+    }
+    out
+}
+
 /// Write the watch state when it differs from the latest one stored.
 fn write_watch(tx: &Transaction, account: i64, w: &WatchReading) -> Result<(), String> {
     let last: Option<(f64, String, Option<String>)> = tx
@@ -1336,7 +1415,12 @@ fn load_plans(conn: &Connection, account: i64) -> Result<Vec<PlanChange>, String
             })
         })
         .map_err(sql)?;
-    rows.collect::<Result<_, _>>().map_err(sql)
+    let rows: Vec<PlanChange> = rows.collect::<Result<_, _>>().map_err(sql)?;
+    let provider: Option<String> = conn
+        .query_row("SELECT provider FROM account WHERE id = ?1", [account], |r| r.get(0))
+        .optional()
+        .map_err(sql)?;
+    Ok(if provider.as_deref() == Some("spacexsi") { compose_unified_plans(rows) } else { rows })
 }
 
 fn load_banks(conn: &Connection, account: i64) -> Result<Vec<BankReading>, String> {
@@ -3049,6 +3133,54 @@ mod tests {
         assert_eq!(h.samples("grok", &key, "credits").unwrap().len(), 2);
         assert!(h.samples("grok", &key, "weekly_pool").unwrap().is_empty());
         assert_eq!(h.samples("spacexsi", &key, "weekly_pool").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_plan_change_on_the_unified_plan_closes_the_unified_cycle() {
+        // Codex's case: the tab draws SpaceXSI's cycles, so a tier change
+        // that leaves the window alone and lowers the reading has to close
+        // the unified cycle as a plan change, not read there as a reset.
+        let p = temp("spacexsi-plan");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let shared = Some(crate::shared::Spacexsi::Shared);
+        let plan = |at: f64, tier: &str| Some(super::super::PlanReading { at, plan: tier.into() });
+        let mut cursor = obs(vec![lane("weekly_pool", 60.0, 5000.0, 600000.0, WEEK)]);
+        cursor.provider = "cursor".into();
+        cursor.account_id = "cursor-acct".into();
+        cursor.spacexsi = shared;
+        cursor.spacexsi_account = Some(cursor.account_key());
+        cursor.plan = plan(5000.0, "pro");
+        let mut grok = obs(vec![lane("credits", 61.0, 5000.0, 600000.0, WEEK)]);
+        grok.provider = "grok".into();
+        grok.account_id = "grok-acct".into();
+        grok.spacexsi = shared;
+        grok.spacexsi_account = cursor.spacexsi_account.clone();
+        grok.plan = plan(5000.0, "supergrok");
+        h.record(&[cursor.clone(), grok.clone()], &t, 5000.0).unwrap();
+        // The same two tiers again: neither vendor's is new, though they
+        // differ from each other.
+        cursor.lanes = vec![lane("weekly_pool", 62.0, 9000.0, 600000.0, WEEK)];
+        cursor.plan = plan(9000.0, "pro");
+        grok.lanes = vec![lane("credits", 62.0, 9000.0, 600000.0, WEEK)];
+        grok.plan = plan(9000.0, "supergrok");
+        h.record(&[cursor.clone(), grok.clone()], &t, 9000.0).unwrap();
+        let key = cursor.account_key();
+        let unified: i64 = h
+            .conn
+            .query_row("SELECT id FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(load_plans(&h.conn, unified).unwrap().len(), 1, "two vendors' tiers read as a change");
+        // Cursor's tier moves up; the window and reset stay, and the
+        // reading falls against the larger allowance.
+        cursor.lanes = vec![lane("weekly_pool", 20.0, 20000.0, 600000.0, WEEK)];
+        cursor.plan = plan(20000.0, "ultra");
+        h.record(&[cursor.clone()], &t, 20000.0).unwrap();
+        let cycles = h.cycles("spacexsi", &key, "weekly_pool").unwrap();
+        assert!(
+            cycles.iter().any(|c| c.end_reason == Some(EndReason::PlanChanged)),
+            "the unified cycle did not close on the plan change"
+        );
     }
 
     #[test]
