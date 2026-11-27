@@ -870,7 +870,9 @@ pub fn overage_lines(pool: &PoolHistory, bars: &[SpendBar], roll_day: Option<(u3
     let mut lines = vec![format!("spent per cycle: {}", each.join(" · "))];
     let loose: f64 = bars.iter().map(|b| b.unattributed).sum();
     if loose > 0.0 {
-        lines.push(format!("{} of it while no allowance was used up", amount(loose)));
+        // Spend while no linked allowance was read as used up: not proof
+        // that none was, since a gap in its readings looks the same.
+        lines.push(format!("{} of it not matched to a used-up allowance", amount(loose)));
     }
     if let Some((day, seen)) = roll_day {
         lines.push(format!("seen to roll on day {day} of the month ({} times)", seen));
@@ -1348,7 +1350,7 @@ mod tests {
         let lines = overage_lines(&t.pools[2], bars, *roll_day);
         assert!(lines[0].contains("A$12.40 · "), "{lines:?}");
         assert!(lines[0].ends_with("A$3.10 so far"), "{lines:?}");
-        assert!(lines[1].starts_with("A$1.00 of it while no allowance"), "{lines:?}");
+        assert_eq!(lines[1], "A$1.00 of it not matched to a used-up allowance", "{lines:?}");
         assert!(lines[2].contains("day 14"), "{lines:?}");
         let Body::Balance(months) = &t.pools[3].body else { unreachable!() };
         let lines = balance_lines(&t.pools[3], months);
