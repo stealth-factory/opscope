@@ -26,7 +26,8 @@ waiting on you.
 
 Each step of the agent loop has a widget that watches it. Put them in panes
 beside the agents, in tmux, Rex, Herdr or Luvus; the website's `factory`
-screen is one such layout.
+screen is one such layout. `mux-activity` is the exception: it reads the
+multiplexer it runs in, so it needs Rex, Herdr or Luvus.
 
 | Step | What you are watching | Widgets |
 |---|---|---|
