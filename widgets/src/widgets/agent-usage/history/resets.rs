@@ -288,7 +288,16 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     // window read as a fall - a restart at the start of the cycle the fold
     // had already opened on schedule.
     let mut end_at_prev: Option<f64> = None;
+    // Whether a cached reading since the last live one reached the end in
+    // force, so closed the cycle as the fold does. One that only stated a
+    // new end before reaching the old one moved the end, and the old end
+    // is then no boundary the fold rolled at.
+    let mut crossed = false;
     for &n in &all {
+        if n.source == Source::Cached {
+            let tol = tolerance(n.window_secs);
+            crossed |= end.is_some_and(|e| fold::rolled_over(e, n, tol, tol));
+        }
         if n.source != Source::Cached {
             if let Some(p) = prev {
                 let tol = tolerance(n.window_secs.or(p.window_secs));
@@ -312,7 +321,7 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
                     tol,
                     due_end: end
                         .filter(|e| fold::rolled_over(*e, n, tol, tol))
-                        .or_else(|| end_at_prev.filter(|e| fold::rolled_over(*e, n, tol, tol))),
+                        .or_else(|| end_at_prev.filter(|e| crossed && fold::rolled_over(*e, n, tol, tol))),
                     plan_changed: fold::plan_change_between(input.plans, p.at, n.at).is_some(),
                     limit_changed: differs(p.limit, n.limit, 1e-9),
                     window_changed: differs(p.window_secs, n.window_secs, 1.0),
@@ -324,6 +333,7 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
                 });
             }
             prev = Some(n);
+            crossed = false;
         }
         if n.reset_at.is_some() {
             end = n.reset_at;
@@ -1243,6 +1253,15 @@ mod tests {
         let i = input(&samples, &[], &[]);
         assert_eq!(verdicts(&i), vec![Verdict::Rollover], "{:#?}", judge(&i));
         assert!(detect(&i).is_empty());
+        // CodeRabbit's case: a cached reading too early to close the cycle
+        // only moves its end. The fold does not roll at E, so the fall in
+        // the live pair across it is a reset, not a rollover.
+        let mut early = s(e - 500.0, 60.0, Some(e + W5), Some(W5));
+        early.source = Source::Cached;
+        let samples = vec![s(e - 700.0, 60.0, Some(e), Some(W5)), early, s(e + 60.0, 0.0, Some(e + W5), Some(W5))];
+        let i = input(&samples, &[], &[]);
+        assert_ne!(verdicts(&i), vec![Verdict::Rollover], "{:#?}", judge(&i));
+        assert_eq!(detect(&i).len(), 1, "{:#?}", judge(&i));
     }
 
     #[test]
