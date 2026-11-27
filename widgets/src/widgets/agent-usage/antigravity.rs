@@ -14,7 +14,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Antigravity: its conversation databases and the Code Assist quota.
+//! Antigravity: its conversation databases and its quota, read on this
+//! machine only.
 //!
 //! Nothing here is a token count, because Antigravity records none. The
 //! conversation stores hold steps the agent took, the history file holds
@@ -30,18 +31,11 @@ use opscope_core as tc;
 use crate::shared::*;
 use crate::*;
 
-/// Where the CLI keeps everything: its token, its conversations and the
-/// prompt history. Also the only proof the agent is installed, since it is
+/// Where the CLI keeps everything: its conversations and the prompt history. Also the only proof the agent is installed, since it is
 /// launched by the IDE and puts no binary on PATH.
 fn antigravity_dir() -> String {
     under_home(".gemini/antigravity-cli")
 }
-
-fn token_path() -> String {
-    format!("{}/antigravity-oauth-token", antigravity_dir())
-}
-
-const CODE_ASSIST_API: &str = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
 
 /// How long to wait for a started `agy` to serve its quota.
 ///
@@ -312,8 +306,7 @@ fn agy_stdout(path: &str, args: &[&str], seconds: u64) -> Result<String, String>
 ///
 /// The one source left that carries the Gemini group. `agy` builds from
 /// October 2026 lock the local server behind a CSRF token they hand only to
-/// their own children, and Google's summary has never held that group, so
-/// for a while the tab could show Gemini only per model. The CLI still
+/// their own children. The CLI still
 /// prints it: `agy -p /usage --output-format json` is a command, not a
 /// prompt - no turn, no tokens - and returns the same groups and buckets
 /// the server did. Found by reading how CodexBar does it.
@@ -397,33 +390,6 @@ fn agy_usage(path: &str) -> Result<Vec<serde_json::Value>, String> {
     })
 }
 
-/// The same quota summary the language server answers, from Google.
-///
-/// This was thought not to exist. The tab said so, and said it in the
-/// strongest terms - that with the app closed there was nothing to ask, on
-/// any machine, for anybody - because the only quota this widget knew about
-/// came out of a process that dies with the IDE.
-///
-/// It does exist, it is on the endpoint the tier already comes from, and the
-/// body is empty rather than the `pluginType` metadata `loadCodeAssist`
-/// wants: sending that here is a 400 naming `metadata` as an unknown field,
-/// which reads exactly like an endpoint that is not there.
-///
-/// What comes back is the same shape the language server sends, group for
-/// group and bucket for bucket, so it needs no parser of its own.
-const REMOTE_QUOTA_API: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-
-/// Each model's own allowance, on the same host and the same credential.
-///
-/// Asked only when the summary carries no Gemini group - which is every
-/// time Google's summary is the one read, since Google's has only ever held
-/// the Claude and GPT-OSS group. The grouped Gemini limit came from the
-/// local language server alone, and `agy` stopped serving that to outside
-/// callers. This is the Gemini quota Google still publishes, per model.
-const REMOTE_MODEL_QUOTA_API: &str =
-    "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
-
 /// The Connect method the language server answers the quota on.
 const ANTIGRAVITY_RPC: &str =
     "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary";
@@ -459,37 +425,14 @@ fn ordered_buckets(group: &serde_json::Value) -> Vec<&serde_json::Value> {
 /// What Antigravity has recorded here, and what its server says is left.
 #[derive(Clone, Default)]
 pub struct Data {
-    /// Which Code Assist tier the account is on. `None` means the call did
-    /// not happen or did not answer, which the tab says out loud.
-    live: Option<serde_json::Value>,
-    /// Why there is no tier, when there is none. The three reasons want
-    /// three different things from the reader - sign in, run the CLI, or
-    /// wait - and the old line offered "expired or the call failed", which
-    /// is the widget admitting it never looked.
-    tier_why: Missing,
-    /// What the endpoint said, when it said anything. Empty otherwise.
-    tier_said: String,
     /// The quota groups, empty when neither source answered.
     quota: Vec<serde_json::Value>,
     /// Why there is no quota, when there is none. Empty when there is.
     quota_why: String,
-    /// Which of the three answered. They agree in shape and very nearly in
-    /// value, so nothing else can tell them apart - and a reader wondering
-    /// why there are numbers with the app shut deserves the answer.
+    /// Which of the two answered. They agree in shape, so nothing else can
+    /// tell them apart - and a reader wondering why there are numbers with
+    /// the app shut deserves the answer.
     quota_from: From,
-    /// True when a language server was running and refused for want of its
-    /// CSRF token. The app is open, so "the app is not running" would be a
-    /// false reason for reading Google's summary instead.
-    local_refused: bool,
-    /// Each Gemini model's own allowance, read only when the summary has no
-    /// Gemini group. Per model, never a group limit.
-    gemini: Vec<crate::parse::ModelQuota>,
-    /// Why there are no Gemini readings when the summary needed them.
-    /// Empty when there are, or when the summary had its own Gemini group.
-    gemini_why: String,
-    /// How the CLI authenticated. Read once here rather than per frame:
-    /// the tab is redrawn on every keypress and this is a file on disk.
-    auth: String,
     /// Conversation databases found.
     sessions: usize,
     /// How many of them answered. A database a running agent has locked is
@@ -616,9 +559,8 @@ fn antigravity_ports() -> Vec<u16> {
 ///
 /// A server that refuses for want of its CSRF token is recorded rather than
 /// skipped, as `{"opscope_refusal": "csrf"}`: `agy` builds from October
-/// 2026 refuse every outside caller that way, and passing over it silently
-/// left the Google summary on screen with nothing to say why the app's own
-/// Gemini group had gone. A real answer on another port still wins.
+/// 2026 refuse every outside caller that way, and the reason names it when
+/// starting `agy` is off. A real answer on another port still wins.
 fn antigravity_quota() -> Option<serde_json::Value> {
     let mut refused = false;
     for port in antigravity_ports() {
@@ -653,16 +595,6 @@ fn antigravity_quota() -> Option<serde_json::Value> {
     refused.then(|| serde_json::json!({ "opscope_refusal": "csrf" }))
 }
 
-/// Which Code Assist tier the account is on.
-///
-impl Data {
-    /// The reason the tier is missing, for callers outside this module -
-    /// the summary says it too, under a heading of Antigravity's own.
-    pub fn why_no_tier(&self) -> Missing {
-        if self.live.is_some() { Missing::Nothing } else { self.tier_why }
-    }
-}
-
 /// Which source the quota on screen came from.
 #[derive(Clone, Copy, Default, PartialEq)]
 pub enum From {
@@ -670,209 +602,23 @@ pub enum From {
     /// started. Nothing was launched and nothing left the machine.
     #[default]
     Local,
-    /// Google, on the endpoint the tier comes from. Works for as long as
-    /// the token lasts, which is an hour past the last run.
-    Google,
     /// A CLI this widget started, read, and stopped again.
     Agy,
 }
 
-/// Why the tier is missing, in the three ways it can be.
-#[derive(Clone, Copy, Default, PartialEq)]
-pub enum Missing {
-    /// There is a tier; nothing is missing.
-    #[default]
-    Nothing,
-    /// No token file, or one with no access token in it.
-    NotSignedIn,
-    /// A token that has lapsed, with how long ago in seconds.
-    Expired(f64),
-    /// A good token and no answer. Google's, not ours.
-    NoAnswer,
-}
-
-
-/// The missing tier in one sentence, ending in what to do about it.
-///
-/// The line this replaces read "no tier: the CLI's access token has expired
-/// or the call failed", which names two causes, commits to neither, and asks
-/// nothing of the reader. Each of these commits, because the widget can tell
-/// them apart - it just was not looking.
-pub fn tier_note(why: Missing) -> String {
-    match why {
-        Missing::Nothing => String::new(),
-        Missing::NotSignedIn => {
-            "no tier · Antigravity has not signed in on this machine yet. \
-             Open it once and the tier appears here."
-                .into()
-        }
-        Missing::Expired(ago) => format!(
-            "no tier · Antigravity's access token expired {} ago. \
-             It refreshes them itself - open it once and this fills in.",
-            left_span(ago)
-        ),
-        Missing::NoAnswer => {
-            "no tier · the token is good, but Google's Code Assist API did not \
-             answer. Nothing to do here; it is retried every hour."
-                .into()
-        }
-    }
-}
-
 /// Why Antigravity publishes no bar, for the summary screen.
 ///
-/// A missing tier is one reason and was the only one this said out loud,
-/// so an account whose tier reads perfectly well produced an empty note
-/// and "No quota published by: antigravity" with nothing after it. The
-/// commoner reason by far is the other one: unlike every other agent here
+/// Unlike every other agent here
 /// Antigravity has no account-wide quota endpoint at all, and its
 /// percentages live in a language server that exists only while the app is
 /// running. Its own tab has always said so; the summary had not.
 pub fn why_no_lane(d: &Data) -> String {
-    let tier = tier_note(d.why_no_tier());
-    if !tier.is_empty() {
-        return tier;
-    }
-    // The remote attempt knows exactly which step failed, and that is more
+    // The `agy` attempt knows exactly which step failed, and that is more
     // use than any sentence written in advance.
     if !d.quota_why.is_empty() {
         return format!("no quota · {}", d.quota_why);
     }
-    "no quota · neither the language server inside the app nor Google answered.".into()
-}
-
-/// The same, with the server's own words when there are any.
-pub fn tier_note_said(why: Missing, said: &str) -> String {
-    let base = tier_note(why);
-    match (base.is_empty(), said.is_empty()) {
-        (true, _) => String::new(),
-        (false, true) => base,
-        (false, false) => format!("{} It said: {}.", base, said),
-    }
-}
-
-/// What is wrong with the credential, read from the same file the call uses.
-///
-/// Cheap enough to do every frame - it is a small JSON file - and it must
-/// not be cached with the call: the call is held for an hour, and a token
-/// that lapses inside that hour would otherwise be reported as an endpoint
-/// that would not answer.
-fn why_no_tier(file: Option<&serde_json::Value>) -> Missing {
-    let Some(file) = file else {
-        return Missing::NotSignedIn;
-    };
-    let tok = &file["token"];
-    if text(tok, "access_token").is_empty() {
-        return Missing::NotSignedIn;
-    }
-    match iso_epoch(&text(tok, "expiry")) {
-        Some(at) if at <= now() => Missing::Expired(now() - at),
-        _ => Missing::NoAnswer,
-    }
-}
-
-fn antigravity_said(file: Option<&serde_json::Value>) -> Result<serde_json::Value, String> {
-    let Some(file) = file else {
-        return Err(String::new());
-    };
-    let tok = &file["token"];
-    let access = text(tok, "access_token");
-    let expiry = iso_epoch(&text(tok, "expiry"));
-    if access.is_empty() || expiry.is_some_and(|at| at <= now()) {
-        return Err(String::new());
-    }
-    post_try(CODE_ASSIST_API, &access)
-}
-
-/// The same call, keeping why it failed.
-fn post_try(url: &str, access: &str) -> Result<serde_json::Value, String> {
-    post_body(url, access, "{\"metadata\":{\"pluginType\":\"GEMINI\"}}")
-}
-
-/// The quota summary Google holds, when nothing local is serving one.
-///
-/// Preferred second, not first: the language server is the app's own answer
-/// and moves as it is used, while this is what Google has recorded. They
-/// agree in shape and very nearly in value, so the tab cannot tell them
-/// apart - which is the point, and why the row says which it read.
-/// Everything that can be decided without leaving the machine, decided
-/// before anything is cached.
-///
-/// The reason has to survive a cache hit. `cached` holds a failure for a
-/// while and does not re-run the closure that produced it, so a reason
-/// captured inside that closure is gone by the next frame and the row falls
-/// back to whatever generic sentence is left - which is how this said
-/// "Google did not answer" about a token that had expired an hour earlier
-/// and was never sent.
-fn remote_token(allowed: bool, file: Option<&serde_json::Value>) -> Result<String, String> {
-    if !allowed {
-        return Err(tc::missing_config(
-            "asking Google is off - set agent_usage.antigravity_remote to true",
-        ));
-    }
-    let Some(file) = file else {
-        return Err(
-            "Antigravity has not signed in on this machine - run `agy` once and sign in".into(),
-        );
-    };
-    let tok = &file["token"];
-    let access = text(tok, "access_token");
-    if access.is_empty() {
-        return Err("the Antigravity token file holds no session - sign in again".into());
-    }
-    // A lapsed token is not sent. It would be refused, and the refusal would
-    // then be the only thing reported, which says less than the expiry does:
-    // this one names how long ago and what refreshes it.
-    if let Some(expiry) = iso_epoch(&text(tok, "expires")) {
-        if expiry <= now() {
-            return Err(expired_note(now() - expiry));
-        }
-    }
-    if let Some(expiry) = iso_epoch(&text(tok, "expiry")) {
-        if expiry <= now() {
-            return Err(expired_note(now() - expiry));
-        }
-    }
-    Ok(access)
-}
-
-fn expired_note(ago: f64) -> String {
-    format!(
-        "Antigravity's token expired {} ago - it refreshes them itself, so open it \
-         or run `agy` once and sign in",
-        left_span(ago)
-    )
-}
-
-/// The ask itself, once the credential is known to be worth sending.
-fn remote_quota(access: &str) -> Result<Vec<serde_json::Value>, String> {
-    let got = post_body(REMOTE_QUOTA_API, access, "{}")
-        .map_err(|said| format!("Google refused the Antigravity token: {}", said))?;
-    match got["groups"].as_array() {
-        Some(groups) if !groups.is_empty() => Ok(groups.clone()),
-        // A 200 with nothing in it. Not a failure to report as one, but not
-        // a reading either, and the difference matters when the reader is
-        // deciding whether to go and open something.
-        _ => Err("Google answered with no quota groups for this account".into()),
-    }
-}
-
-fn post_body(url: &str, access: &str, body: &str) -> Result<serde_json::Value, String> {
-    post_json_said(
-        url,
-        &[
-            ("Authorization", &format!("Bearer {}", access)),
-            ("Content-Type", "application/json"),
-            // Google gates this response on the client string. Sent as
-            // plain opscope it answers UNSUPPORTED_CLIENT and returns
-            // no tier at all; the parenthesised form is the conventional way
-            // to name the client being spoken for while still saying who is
-            // actually calling.
-            ("User-Agent", "opscope (antigravity-cli)"),
-        ],
-        body,
-        20,
-    )
+    "no quota · neither the language server inside the app nor `agy` answered.".into()
 }
 
 /// How many steps one conversation store records, or nothing if it would
@@ -892,22 +638,12 @@ fn conversation_steps(path: &str) -> Option<f64> {
     Some(count as f64)
 }
 
-/// The token file, read once, with every token in it registered so no
-/// shared reading carries one.
-fn antigravity_creds(caches: &mut Caches) -> Option<serde_json::Value> {
-    let file = read_json(&token_path());
-    if let Some(file) = &file {
-        secret_fields(caches, &file["token"], &["access_token", "refresh_token", "id_token"]);
-    }
-    file
-}
-
 /// Whether this pass may start `agy`.
 ///
 /// It boots a language server, so it waits for three things at once: the
 /// reader chose Antigravity, the reader allowed starting `agy`, and nothing
 /// cheaper has already answered. A hidden agent used to start one anyway,
-/// ahead of Google, and the pass waited on it before any other reading.
+/// and the pass waited on it before any other reading.
 fn may_start_agy(shown: bool, start: bool, have_quota: bool) -> bool {
     shown && start && !have_quota
 }
@@ -922,77 +658,45 @@ fn may_start_agy(shown: bool, start: bool, have_quota: bool) -> bool {
 /// `agy` is skipped when it does not.
 pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     use std::os::unix::fs::MetadataExt;
-    // One read of the token file for the guard and every request, so a
-    // token rotated mid-pass is never sent unregistered. Read again only
-    // after this pass started `agy`, which may have refreshed it.
-    let mut file = antigravity_creds(caches);
-    // The refusal is cached with the failure, so it is shown for as long as
-    // the failure lasts rather than only on the frame the call was made.
-    let live = cached(caches, "antigravity", PLAN_TTL, || {
-        match antigravity_said(file.as_ref()) {
-            Ok(v) => Some(v),
-            Err(why) => Some(serde_json::json!({ "opscope_refusal": why })),
-        }
-    });
-    let said = live
-        .as_ref()
-        .map(|v| text(v, "opscope_refusal"))
-        .unwrap_or_default();
-    let live = if said.is_empty() { live } else { None };
+    // Nothing here leaves the machine. The quota comes from a language
+    // server already running, or from Antigravity's own CLI; the
+    // credential file is never read and Google's internal Code Assist
+    // endpoints are never called, since Google has said that calling them
+    // from an outside client can get the account flagged.
     let local = cached(caches, "antigravity-quota", LIVE_TTL, antigravity_quota);
+    let local_refused = local
+        .as_ref()
+        .is_some_and(|v| text(v, "opscope_refusal") == "csrf");
     let mut d = Data {
-        tier_why: if live.is_some() { Missing::Nothing } else { why_no_tier(file.as_ref()) },
-        tier_said: said,
-        live,
-        local_refused: local
-            .as_ref()
-            .is_some_and(|v| text(v, "opscope_refusal") == "csrf"),
         quota: local
             .and_then(|got| got.as_array().cloned())
-            .unwrap_or_default(),
-        auth: file
-            .as_ref()
-            .map(|file| text(file, "auth_method"))
             .unwrap_or_default(),
         ..Data::default()
     };
     // Local first: it is the app's own answer and moves as the app is used.
-    // Google's is asked only when there is no server to ask, and is held far
-    // longer - it is a record rather than a live meter, and unlike the local
-    // one it is a request that leaves this machine.
-    // Then the CLI's own `/usage`, ahead of Google. It costs a process and a
-    // few seconds where Google costs one request, but it is the only source
-    // left with the Gemini group - Google's summary holds Claude and GPT-OSS
-    // alone - and a cheaper answer missing half the limits is not the better
-    // one. Behind `antigravity_start`, the setting that already decides
-    // whether this widget may start `agy`, and only for a tab the reader
-    // chose: the summary draws selected agents, and a poll for another
-    // agent must not boot this language server.
+    // Then the CLI's own `/usage`, which costs a process and a few seconds.
+    // Behind `antigravity_start`, the setting that decides whether this
+    // widget may start `agy`, and only for a tab the reader chose: the
+    // summary draws selected agents, and a poll for another agent must not
+    // boot this language server.
     //
     // A failure goes back to the cache as a failure and its reason is
     // written in afterwards, so it keeps the short backoff and the sentence
     // lasts as long as the failure does.
     let agy = agy_path();
-    let mut agy_why = String::new();
+    let mut why = String::new();
     let mut agy_old = false;
     if may_start_agy(shown, cfg.antigravity_start, !d.quota.is_empty()) {
         if let Some(path) = &agy {
             const KEY: &str = "antigravity-agy-usage";
             let mut asked = String::new();
-            let mut started = false;
-            let got = cached(caches, KEY, AGY_USAGE_TTL, || {
-                started = true;
-                match agy_usage(path) {
-                    Ok(groups) => Some(serde_json::Value::Array(groups)),
-                    Err(said) => {
-                        asked = said;
-                        None
-                    }
+            let got = cached(caches, KEY, AGY_USAGE_TTL, || match agy_usage(path) {
+                Ok(groups) => Some(serde_json::Value::Array(groups)),
+                Err(said) => {
+                    asked = said;
+                    None
                 }
             });
-            if started {
-                file = antigravity_creds(caches);
-            }
             remember_refusal(caches, KEY, &asked);
             match got {
                 Some(serde_json::Value::Array(groups)) => {
@@ -1000,131 +704,51 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                     d.quota_from = From::Agy;
                 }
                 held => {
-                    agy_why = held.map(|v| text(&v, "why")).unwrap_or(asked);
-                    agy_old = agy_why.contains("predates");
+                    why = held.map(|v| text(&v, "why")).unwrap_or(asked);
+                    agy_old = why.contains("predates");
                 }
             }
         }
     }
-    // Google next: one request, good for as long as the token lasts. Last,
-    // the pty start, which only an `agy` too old for `/usage` still answers
-    // - newer ones lock the server it reads behind the same CSRF token.
+    // Last, the pty start, which only an `agy` too old for `/usage` still
+    // answers - newer ones lock the server it reads behind a CSRF token.
+    if may_start_agy(shown, cfg.antigravity_start, !d.quota.is_empty())
+        && (agy_old || agy.is_none())
+    {
+        let mut asked = String::new();
+        let got = cached(caches, "antigravity-agy", AGY_TTL, || match agy_quota() {
+            Ok(groups) => Some(serde_json::Value::Array(groups)),
+            Err(said) => {
+                asked = said;
+                None
+            }
+        })
+        .and_then(|got| got.as_array().cloned());
+        match got {
+            Some(groups) => {
+                d.quota = groups;
+                d.quota_from = From::Agy;
+                why.clear();
+            }
+            // The later failure is the more specific one, and it names what
+            // to do.
+            None => {
+                if !asked.is_empty() {
+                    why = asked;
+                }
+            }
+        }
+    }
+    if d.quota.is_empty() && why.is_empty() && !cfg.antigravity_start {
+        why = tc::missing_config(if local_refused {
+            "the app's language server refuses outside readers, and starting `agy` is off - \
+             set agent_usage.antigravity_start to true"
+        } else {
+            "starting `agy` is off - set agent_usage.antigravity_start to true"
+        });
+    }
     if d.quota.is_empty() {
-        let mut why = String::new();
-        match remote_token(cfg.antigravity_remote, file.as_ref()) {
-            // Decided before the cache, so it survives a held failure and
-            // is the same sentence on every frame until it changes.
-            Err(said) => why = said,
-            Ok(access) => {
-                let mut asked = String::new();
-                let got = cached(caches, "antigravity-remote", PLAN_TTL, || {
-                    match remote_quota(&access) {
-                        Ok(groups) => Some(serde_json::Value::Array(groups)),
-                        Err(said) => {
-                            asked = said;
-                            None
-                        }
-                    }
-                })
-                .and_then(|got| got.as_array().cloned());
-                match got {
-                    Some(groups) => {
-                        d.quota = groups;
-                        d.quota_from = From::Google;
-                    }
-                    None => {
-                        why = if asked.is_empty() {
-                            "Google did not answer, and the refusal is still held".to_string()
-                        } else {
-                            asked
-                        }
-                    }
-                }
-            }
-        }
-        // The CLI's reason outranks Google's for the same reason as below:
-        // it is the more specific one, and it names what to do.
-        if d.quota.is_empty() && !agy_why.is_empty() {
-            why = agy_why.clone();
-        }
-        if may_start_agy(shown, cfg.antigravity_start, !d.quota.is_empty())
-            && (agy_old || agy.is_none())
-        {
-            let mut asked = String::new();
-            let got = cached(caches, "antigravity-agy", AGY_TTL, || match agy_quota() {
-                Ok(groups) => Some(serde_json::Value::Array(groups)),
-                Err(said) => {
-                    asked = said;
-                    None
-                }
-            })
-            .and_then(|got| got.as_array().cloned());
-            match got {
-                Some(groups) => {
-                    d.quota = groups;
-                    d.quota_from = From::Agy;
-                    why.clear();
-                }
-                // Both failed. The CLI's reason is the later and more
-                // specific one, so it wins - "Google refused the token" and
-                // "`agy` is not signed in" are the same fault said twice,
-                // and the second names what to do.
-                None => {
-                    if !asked.is_empty() {
-                        why = asked;
-                    }
-                }
-            }
-        }
-        if d.quota.is_empty() {
-            d.quota_why = why;
-        }
-    }
-    // Each Gemini model's own allowance, under the group limits. With no
-    // Gemini group - Google's summary never has one - they are the Gemini
-    // quota there is; with one, they say which model is spending it, which
-    // the group cannot. Asked on the same terms as the summary: never when
-    // asking Google is off, never with a lapsed token. Why they are missing
-    // is said only when there is no group to stand in for them, since a
-    // warning under four good bars reads as though the bars were wrong.
-    //
-    // A failure goes back to the cache as a failure, so it keeps the short
-    // backoff rather than being held for the hour a reading is; its reason
-    // is written into the slot afterwards so it lasts as long as the failure.
-    if !d.quota.is_empty() {
-        match remote_token(cfg.antigravity_remote, file.as_ref()) {
-            Err(said) => d.gemini_why = said,
-            Ok(access) => {
-                const KEY: &str = "antigravity-models";
-                let mut asked = String::new();
-                let got = cached(caches, KEY, PLAN_TTL, || {
-                    match post_body(REMOTE_MODEL_QUOTA_API, &access, "{}") {
-                        Ok(v) => Some(v),
-                        Err(said) => {
-                            asked = said;
-                            None
-                        }
-                    }
-                });
-                remember_refusal(caches, KEY, &asked);
-                let got = got.unwrap_or_default();
-                let refused = match text(&got, "why") {
-                    held if held.is_empty() => asked,
-                    held => held,
-                };
-                match crate::parse::parse_antigravity_model_quota(&got.to_string()) {
-                    _ if !refused.is_empty() => {
-                        d.gemini_why = format!("Google refused the per-model quota: {}", refused)
-                    }
-                    Some(models) if !models.is_empty() => d.gemini = models,
-                    Some(_) => d.gemini_why = "Google lists no Gemini models for this account".into(),
-                    None => d.gemini_why = "Google's per-model quota came back unreadable".into(),
-                }
-            }
-        }
-        if has_gemini_group(&d.quota) {
-            d.gemini_why.clear();
-        }
+        d.quota_why = why;
     }
     let mut files: Vec<String> = std::fs::read_dir(format!("{}/conversations", antigravity_dir()))
         .into_iter()
@@ -1211,50 +835,20 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             });
         }
     }
-    // Per-model Gemini readings get one lane, the busiest model named as
-    // that, and only when no Gemini group came back: then it is the only
-    // Gemini figure there is. Beside a group it is a fifth bar `agy` itself
-    // never draws, so the per-model rows stay on the tab. Every model would
-    // be a dozen lanes on a screen meant for comparing agents, and an
-    // average would be a number Google never published.
-    let top = d
-        .gemini
-        .iter()
-        .min_by(|a, b| a.left.partial_cmp(&b.left).unwrap_or(std::cmp::Ordering::Equal));
-    if let Some(top) = top.filter(|_| !has_gemini_group(&d.quota)) {
-        out.push(Lane {
-            label: "gemini busiest".into(),
-            pct: 100.0 * (1.0 - top.left),
-            window_secs: None,
-            reset: top.reset,
-            stale: false,
-            projected: false,
-            apart: !out.is_empty(),
-        });
-    }
     out
-}
-
-/// Whether the summary carries a Gemini group of its own. The local server's
-/// does; Google's never has.
-fn has_gemini_group(groups: &[serde_json::Value]) -> bool {
-    groups
-        .iter()
-        .any(|g| text(g, "displayName").to_lowercase().starts_with("gemini"))
 }
 
 /// One bar per limit, grouped by the model family it covers.
 ///
 /// Shown as spent rather than the remaining fraction the RPC returns, so
 /// red means the same here as on every other tab. Which groups there are is
-/// whatever the source sends - the local server has sent Gemini beside
-/// Claude and GPT-OSS, Google sends only the latter - and each is named
-/// with the models Google says it covers, since a heading like "Claude and
+/// whatever the source sends - Gemini beside Claude and GPT-OSS - and each
+/// is named
+/// with the models the source says it covers, since a heading like "Claude and
 /// GPT models" reads wrongly to anyone who does not know the GPT is GPT-OSS.
 fn antigravity_quota_rows_with_plots(
     groups: &[serde_json::Value],
     from: From,
-    local_refused: bool,
     w: usize,
     p: &Palette,
     plots: &mut Vec<tc::Plot>,
@@ -1266,18 +860,6 @@ fn antigravity_quota_rows_with_plots(
     // more than elsewhere; the short one still says it is not this machine's
     // own tally. Shortened before it can clip, as the other headers are.
     let (mut note, short, tiny) = match from {
-        // Running and refusing is not the same as shut, and saying the app
-        // is not running while it is open beside the pane is a false reason.
-        From::Google if local_refused => (
-            " · account-wide, from Google - the app's server refused",
-            " · from Google",
-            " · remote",
-        ),
-        From::Google => (
-            " · account-wide, from Google - the app is not running",
-            " · from Google",
-            " · remote",
-        ),
         From::Agy => (
             " · account-wide, from `agy`, started for this reading",
             " · from `agy`",
@@ -1303,20 +885,6 @@ fn antigravity_quota_rows_with_plots(
         ],
         w - 1,
     )];
-    if local_refused && from == From::Google {
-        let mut why = "Antigravity's language server now refuses outside readers: it \
-                       wants a CSRF token it gives only to processes it starts itself. \
-                       This is Google's summary instead."
-            .to_string();
-        if !has_gemini_group(groups) {
-            why.push_str(" Google publishes no grouped Gemini limit.");
-        }
-        rows.extend(
-            wrap_text(&why, w.saturating_sub(4).max(1))
-                .into_iter()
-                .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1)),
-        );
-    }
     for group in groups {
         let buckets = ordered_buckets(group);
         if buckets.is_empty() {
@@ -1327,7 +895,7 @@ fn antigravity_quota_rows_with_plots(
             s => s,
         };
         rows.push(tc::seg(&[(p.txt.as_str(), format!("  {}", name))], w - 1));
-        // Google's own list of what the group covers - "Claude Opus, Claude
+        // The source's own list of what the group covers - "Claude Opus, Claude
         // Sonnet, GPT-OSS" - which is what settles the heading.
         let covers = crate::parse::strip_controls(&text(group, "description"));
         if !covers.is_empty() {
@@ -1355,35 +923,6 @@ fn antigravity_quota_rows_with_plots(
     rows.push(String::new());
     rows
 }
-
-/// A model id cut into lines of at most `budget` characters, after its
-/// hyphens where it can be and mid-word only where a piece is longer than
-/// the line. `gemini-3.5-flash-extra-low` does not fit a 20-column pane even
-/// on a row of its own, and a clipped id names a model that does not exist.
-fn break_model_id(id: &str, budget: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
-    for piece in id.split_inclusive('-') {
-        if !line.is_empty() && line.chars().count() + piece.chars().count() > budget {
-            lines.push(std::mem::take(&mut line));
-        }
-        line.push_str(piece);
-        while line.chars().count() > budget {
-            let head: String = line.chars().take(budget).collect();
-            line = line.chars().skip(budget).collect();
-            lines.push(head);
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
-}
-
-/// What a pace-less bar row needs besides its label: three cells of indent,
-/// a space, the bar's eight-cell floor, the six-cell percentage, two cells
-/// before the reset, and the column the frame keeps free.
-const QUOTA_ROW_FIXED: usize = 21;
 
 /// One limit as a bar: its label, the bar, % spent, pace, and the reset.
 #[allow(clippy::too_many_arguments)]
@@ -1432,86 +971,6 @@ fn quota_bar_row(
     let refs: Vec<(&str, String)> =
         line.iter().map(|(c, t)| (c.as_str(), t.clone())).collect();
     tc::seg(&refs, w - 1)
-}
-
-/// Gemini's quota as Google publishes it when there is no Gemini group:
-/// one bar per model, each that model's own allowance.
-///
-/// Headed so it cannot be read as a shared limit, because it is not one -
-/// Google states no window for these, so they carry no pace either. When
-/// the readings are missing the reason is drawn where they would be, since
-/// a summary with no Gemini in it looks like an account that has none.
-fn gemini_model_rows(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>, rows: &mut Vec<String>) {
-    if d.gemini.is_empty() && d.gemini_why.is_empty() {
-        return;
-    }
-    rows.push(tc::seg(&[(p.txt.as_str(), "  Gemini, per model".to_string())], w - 1));
-    let (note, colour) = if d.gemini.is_empty() {
-        (format!("No Gemini readings: {}.", d.gemini_why), p.warn.as_str())
-    } else {
-        (
-            "Each model's own allowance, from Google - not slices of one shared limit."
-                .to_string(),
-            p.dim.as_str(),
-        )
-    };
-    rows.extend(
-        wrap_text(&note, w.saturating_sub(6).max(1))
-            .into_iter()
-            .map(|line| tc::seg(&[(colour, format!("    {}", line))], w - 1)),
-    );
-    // Model ids run to 26 characters, and a label that wide in a narrow pane
-    // pushes the bar and the percentage past the edge, where `seg` clips
-    // them - the row fits and the reading is gone. So below the width a bar
-    // needs beside its label, each name takes a row of its own and the bar
-    // goes underneath it.
-    let label_w = d.gemini.iter().map(|m| m.model.chars().count()).max().unwrap_or(1);
-    let stacked = label_w + QUOTA_ROW_FIXED > w;
-    for m in &d.gemini {
-        if stacked {
-            for piece in break_model_id(&m.model, w.saturating_sub(4).max(1)) {
-                rows.push(tc::seg(&[(p.dim.as_str(), format!("   {}", piece))], w - 1));
-            }
-            let row = quota_bar_row(rows.len(), "", 0, m.left, None, m.reset, w, p, plots);
-            rows.push(row);
-        } else {
-            let row = quota_bar_row(rows.len(), &m.model, label_w, m.left, None, m.reset, w, p, plots);
-            rows.push(row);
-        }
-    }
-    rows.push(String::new());
-}
-
-fn antigravity_plan_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
-    let live = d.live.clone().unwrap_or(serde_json::Value::Null);
-    let filled = |v: &serde_json::Value| v.as_object().is_some_and(|o| !o.is_empty());
-    if !filled(&live["currentTier"]) && !filled(&live["paidTier"]) {
-        return Vec::new();
-    }
-    let (cur, paid) = (&live["currentTier"], &live["paidTier"]);
-    let mut pairs: Vec<(String, String)> = Vec::new();
-    for (label, value) in [
-        ("code assist tier", text(cur, "id")),
-        // paidTier is the Google AI subscription behind the account, which
-        // is a different thing from the Code Assist tier and can disagree
-        // with it - free-tier here, while the account is on Ultra. Both are
-        // stated.
-        ("google ai plan", text(paid, "name")),
-        ("project", text(&live, "cloudaicompanionProject")),
-        ("auth", d.auth.clone()),
-    ] {
-        if !value.is_empty() {
-            pairs.push((label.into(), value));
-        }
-    }
-    // The two tiers can disagree - free-tier beside Google AI Ultra is
-    // normal, since one is GCP licensing and the other a consumer plan - but
-    // that is a paragraph the docs can carry, not four lines on every frame.
-    let headline = match text(cur, "name") {
-        s if s.is_empty() => text(paid, "name"),
-        s => s,
-    };
-    plan_rows(&headline, &pairs, w, "", None, "", p)
 }
 
 /// The caveat on the step count, in the longest form that fits.
@@ -1611,17 +1070,7 @@ fn antigravity_activity_rows(d: &Data, w: usize, p: &Palette) -> Vec<String> {
 }
 
 fn antigravity_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    let mut rows =
-        antigravity_quota_rows_with_plots(&d.quota, d.quota_from, d.local_refused, w, p, plots);
-    gemini_model_rows(d, w, p, plots, &mut rows);
-    if d.live.is_none() {
-        rows.extend(
-            wrap_text(&tier_note_said(d.tier_why, &d.tier_said), w.saturating_sub(4).max(20))
-                .into_iter()
-                .map(|line| tc::seg(&[(p.warn.as_str(), format!("  {}", line))], w - 1)),
-        );
-        rows.push(String::new());
-    }
+    let mut rows = antigravity_quota_rows_with_plots(&d.quota, d.quota_from, w, p, plots);
     rows.extend(antigravity_activity(d, w, p));
     // The absence is only worth explaining while it is one. With the quota
     // drawn above, a paragraph about why there is no quota contradicts the
@@ -1631,8 +1080,8 @@ fn antigravity_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<
     // rather than the shape of the problem. "It comes from the language
     // server while Antigravity is running" is true and was all this said,
     // and it sends a reader to open an app when the actual fault can be a
-    // session signed out, a token an hour old, or a setting turned off -
-    // none of which opening the app on its own would settle.
+    // CLI signed out, a CLI too old, or a setting turned off - none of
+    // which opening the app on its own would settle.
     let absent = if d.quota_why.is_empty() {
         "No tokens are recorded locally, and no quota either: it comes \
          from the language server while Antigravity is running, so start \
@@ -1658,10 +1107,13 @@ fn antigravity_body_with_plots(d: &Data, w: usize, p: &Palette, plots: &mut Vec<
     rows
 }
 
-/// The whole tab: what is left of the limits, what this machine did, and
-/// which subscription the percentages are percentages of.
+/// The whole tab: what is left of the limits and what this machine did.
+///
+/// There is no plan block. The tier and subscription came only from
+/// Google's internal Code Assist endpoint, which an outside client must not
+/// call, and neither the language server nor `agy` reports them.
 pub fn tab_with_plots(d: &Data, w: usize, _h: usize, _cfg: &Config, p: &Palette, plots: &mut Vec<tc::Plot>) -> Vec<String> {
-    add_section(antigravity_body_with_plots(d, w, p, plots), antigravity_plan_rows(d, w, p))
+    antigravity_body_with_plots(d, w, p, plots)
 }
 
 #[cfg(test)]
@@ -1670,53 +1122,44 @@ mod tests {
 
     #[test]
     fn the_note_says_which_step_failed_not_that_something_did() {
-        // "No quota" covered four situations wanting different things from
-        // the reader: never signed in, signed out since, an hour-old token,
-        // and a Google that said no. Only one of them is fixed by opening
-        // the app, so the note carries whichever actually happened.
+        // "No quota" covers situations wanting different things from the
+        // reader, so the note carries whichever actually happened.
         let with = |why: &str| Data {
-            live: Some(serde_json::json!({"currentTier": {"id": "free"}})),
             quota: Vec::new(),
             quota_why: why.to_string(),
             ..Data::default()
         };
 
-        let d = with("Antigravity's token expired 2h ago - it refreshes them itself");
+        let d = with("`agy -p /usage` printed no report - it may not be signed in");
         assert!(lanes(&d).is_empty(), "no groups, no lanes");
         let note = why_no_lane(&d);
         assert!(note.starts_with("no quota · "), "{}", note);
-        assert!(note.contains("expired 2h ago"), "the step that failed was dropped: {}", note);
+        assert!(note.contains("may not be signed in"), "the step that failed was dropped: {}", note);
 
         // Off by configuration is a reason too, and names the key.
-        let note = why_no_lane(&with(
-            "asking Google is off - set agent_usage.antigravity_remote to true",
-        ));
-        assert!(note.contains("agent_usage.antigravity_remote"), "{}", note);
+        let note = why_no_lane(&with(&tc::missing_config(
+            "starting `agy` is off - set agent_usage.antigravity_start to true",
+        )));
+        assert!(note.contains("agent_usage.antigravity_start"), "{}", note);
 
-        // A tier that cannot be read still wins: it is the older problem and
-        // opening the app is what fixes it.
-        let lapsed = Data {
-            live: None,
-            tier_why: Missing::Expired(3600.0),
-            quota_why: "Google refused the Antigravity token".into(),
-            ..Data::default()
-        };
-        let note = why_no_lane(&lapsed);
-        assert!(note.contains("expired"), "tier reason lost: {}", note);
-        assert!(!note.contains("Google refused"), "two reasons at once: {}", note);
+        // With no reason recorded, it names both sources and blames neither
+        // the network nor Google.
+        let note = why_no_lane(&Data::default());
+        assert!(note.contains("`agy`"), "{}", note);
+        assert!(!note.contains("Google"), "{}", note);
     }
 
     #[test]
-    fn the_remote_ask_refuses_before_it_leaves_the_machine() {
-        // Turned off, and there is no request to make - the reason names the
-        // key rather than blaming the network.
-        let off = remote_token(false, None).unwrap_err();
-        assert!(off.contains("agent_usage.antigravity_remote"), "{}", off);
-        assert!(off.contains(tc::SET_IN_SETTINGS), "{}", off);
-        // It may name Google - that is where the request would have gone -
-        // but it must not report a refusal or a silence that never happened.
-        for blame in ["refused", "did not answer", "no quota groups"] {
-            assert!(!off.contains(blame), "blamed the server for a setting: {}", off);
+    fn nothing_here_calls_google_or_reads_the_oauth_token() {
+        // Google told T3 Code that calling Antigravity's internal Code
+        // Assist endpoints from an outside client can get the account
+        // flagged. The source must not regain them, nor the token they need.
+        let src = include_str!("antigravity.rs");
+        let host = ["cloudcode-pa", ".googleapis.com"].concat();
+        let token = ["antigravity-oauth", "-token"].concat();
+        let internal = ["v1", "internal:"].concat();
+        for banned in [host, token, internal] {
+            assert!(!src.contains(&banned), "{} is back in antigravity.rs", banned);
         }
     }
     use super::*;
@@ -1980,9 +1423,8 @@ mod tests {
         );
     }
 
-    /// Google's summary as it actually arrives: the one group, with the
-    /// models it covers.
-    fn google_summary() -> Vec<serde_json::Value> {
+    /// The Claude and GPT-OSS group as it arrives, with the models it covers.
+    fn claude_group() -> Vec<serde_json::Value> {
         vec![serde_json::json!({
             "displayName": "Claude and GPT models",
             "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
@@ -1993,10 +1435,6 @@ mod tests {
                  "resetTime": "2099-01-01T00:00:00Z", "remainingFraction": 1}
             ]
         })]
-    }
-
-    fn model(name: &str, left: f64) -> crate::parse::ModelQuota {
-        crate::parse::ModelQuota { model: name.into(), left, reset: iso_epoch("2099-01-01T00:00:00Z") }
     }
 
     /// `agy -p /usage` as it actually arrives, through the parser that reads
@@ -2176,7 +1614,6 @@ mod tests {
         let d = Data {
             quota: agy_report(),
             quota_from: From::Agy,
-            gemini: vec![model("gemini-3-flash", 0.4), model("gemini-2.5-pro", 1.0)],
             ..Data::default()
         };
         let found = lanes(&d);
@@ -2184,7 +1621,7 @@ mod tests {
         assert_eq!(
             labels,
             ["gemini 5h", "gemini weekly", "claude 5h", "claude weekly"],
-            "the four bars agy draws, no per-model lane beside its own Gemini group"
+            "the four bars agy draws"
         );
         assert!((found[0].pct - 70.0).abs() < 1e-9, "spent, not left");
         assert!((found[1].pct - 20.0).abs() < 1e-9);
@@ -2193,135 +1630,31 @@ mod tests {
     }
 
     #[test]
-    fn agy_usage_draws_both_groups_and_keeps_the_per_model_rows() {
+    fn agy_usage_draws_both_groups() {
         let d = Data {
-            live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
             quota: agy_report(),
             quota_from: From::Agy,
-            // The app's server refused too; that is not what is on screen.
-            local_refused: true,
-            gemini: vec![model("gemini-3-flash", 0.75)],
             ..Data::default()
         };
         let mut plots = Vec::new();
         let shown = antigravity_body_with_plots(&d, 120, &palette(), &mut plots).join("\n");
         assert!(shown.contains("from `agy`"), "{}", shown);
-        assert!(!shown.contains("Google's summary instead"), "{}", shown);
+        assert!(!shown.contains("Google"), "{}", shown);
         assert!(shown.contains("Gemini Models") && shown.contains("Claude and GPT models"), "{}", shown);
         assert!(shown.contains("Gemini Flash, Gemini Pro"), "{}", shown);
-        assert!(shown.contains("Gemini, per model") && shown.contains("gemini-3-flash"), "{}", shown);
-        // Four group windows and one model.
-        assert_eq!(plots.len(), 5);
-    }
-
-    #[test]
-    fn a_refusing_local_server_is_not_reported_as_an_app_that_is_shut() {
-        let p = palette();
-        let shown = antigravity_quota_rows_with_plots(
-            &google_summary(), From::Google, true, 120, &p, &mut Vec::new(),
-        )
-        .join("\n");
-        assert!(!shown.contains("not running"), "the app is open: {}", shown);
-        assert!(shown.contains("refused"), "{}", shown);
-        assert!(shown.contains("CSRF token"), "{}", shown);
-        assert!(shown.contains("no grouped Gemini limit"), "{}", shown);
-        // Without a refusal, the old reason stands.
-        let shut = antigravity_quota_rows_with_plots(
-            &google_summary(), From::Google, false, 120, &p, &mut Vec::new(),
-        )
-        .join("\n");
-        assert!(shut.contains("not running"), "{}", shut);
-        assert!(!shut.contains("CSRF"), "{}", shut);
+        // Four group windows, and no plan block: the tier came only from
+        // Google's internal endpoint.
+        assert_eq!(plots.len(), 4);
+        assert!(!shown.contains("code assist tier"), "{}", shown);
     }
 
     #[test]
     fn a_group_says_which_models_it_covers() {
         // "Claude and GPT models" reads as a mistake until it says the GPT
-        // is GPT-OSS - and Google says so, in the group's description.
-        let shown = antigravity_quota_rows(&google_summary(), From::Google, 120, &palette()).join("\n");
+        // is GPT-OSS - and the source says so, in the group's description.
+        let shown = antigravity_quota_rows(&claude_group(), From::Agy, 120, &palette()).join("\n");
         assert!(shown.contains("Claude and GPT models"));
         assert!(shown.contains("Claude Opus, Claude Sonnet, GPT-OSS"), "{}", shown);
-    }
-
-    #[test]
-    fn gemini_per_model_readings_are_drawn_and_headed_as_per_model() {
-        let d = Data {
-            live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
-            quota: google_summary(),
-            quota_from: From::Google,
-            local_refused: true,
-            gemini: vec![model("gemini-3-flash", 0.75), model("gemini-2.5-pro", 1.0)],
-            ..Data::default()
-        };
-        let mut plots = Vec::new();
-        let rows = antigravity_body_with_plots(&d, 120, &palette(), &mut plots);
-        let shown = rows.join("\n");
-        assert!(shown.contains("Gemini, per model"), "{}", shown);
-        assert!(shown.contains("not slices of one shared limit"), "{}", shown);
-        let flash = rows.iter().position(|r| r.contains("gemini-3-flash")).unwrap();
-        assert!(rows[flash].contains("25%"), "spent, not left: {}", rows[flash]);
-        assert!(rows.iter().any(|r| r.contains("gemini-2.5-pro")));
-        // Two windows of the group and two models, each with its bar on its
-        // own row.
-        assert_eq!(plots.len(), 4);
-        assert!(plots.iter().any(|plot| plot.y == flash));
-    }
-
-    #[test]
-    fn missing_gemini_readings_say_why_where_they_would_be() {
-        let d = Data {
-            live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
-            quota: google_summary(),
-            quota_from: From::Google,
-            gemini_why: "Google refused the per-model quota: the server answered 500".into(),
-            ..Data::default()
-        };
-        let shown = antigravity_body(&d, 120, &palette()).join("\n");
-        assert!(shown.contains("Gemini, per model"), "{}", shown);
-        assert!(shown.contains("No Gemini readings: Google refused"), "{}", shown);
-        // Nothing to say when the summary carried its own Gemini group.
-        let grouped = Data { quota: groups(&[("Gemini", "5h", 0.5)]), ..Data::default() };
-        assert!(!antigravity_body(&grouped, 120, &palette()).join("\n").contains("per model"));
-    }
-
-    #[test]
-    fn the_summary_gets_one_gemini_lane_for_the_busiest_model() {
-        let d = Data {
-            quota: google_summary(),
-            gemini: vec![
-                model("gemini-2.5-pro", 1.0),
-                model("gemini-3-flash", 0.4),
-                model("gemini-3.5-flash-low", 0.9),
-            ],
-            ..Data::default()
-        };
-        let found = lanes(&d);
-        let gemini: Vec<_> = found.iter().filter(|l| l.label.starts_with("gemini")).collect();
-        assert_eq!(gemini.len(), 1, "one lane, not one per model");
-        assert_eq!(gemini[0].label, "gemini busiest");
-        assert!((gemini[0].pct - 60.0).abs() < 1e-9);
-        assert!(gemini[0].apart, "not a third window of the Claude group");
-        assert!(gemini[0].label.chars().count() <= 16, "the summary's label column");
-        // No readings, no lane - never a 0% standing in for a missing one.
-        let none = Data { quota: google_summary(), ..Data::default() };
-        assert!(lanes(&none).iter().all(|l| !l.label.starts_with("gemini")));
-    }
-
-    #[test]
-    fn a_model_id_breaks_after_its_hyphens_and_loses_nothing() {
-        let id = "gemini-3.5-flash-extra-low";
-        assert_eq!(break_model_id(id, 40), [id]);
-        assert_eq!(break_model_id(id, 16), ["gemini-3.5-", "flash-extra-low"]);
-        // A piece longer than the line is cut mid-word, not dropped.
-        let tight = break_model_id(id, 5);
-        assert!(tight.iter().all(|l| l.chars().count() <= 5), "{:?}", tight);
-        assert_eq!(tight.concat(), id);
-    }
-
-    #[test]
-    fn only_a_summary_without_gemini_asks_for_the_per_model_readings() {
-        assert!(!has_gemini_group(&google_summary()));
-        assert!(has_gemini_group(&groups(&[("Gemini Models", "5h", 1.0)])));
     }
 
     #[test]
@@ -2336,7 +1669,7 @@ mod tests {
         ]);
         let mut plots = Vec::new();
         let rows =
-            antigravity_quota_rows_with_plots(&quota, From::Local, false, 96, &palette(), &mut plots);
+            antigravity_quota_rows_with_plots(&quota, From::Local, 96, &palette(), &mut plots);
         assert_eq!(plots.len(), 6);
         for pair in plots.chunks_exact(2) {
             assert!(rows[pair[0].y].contains("5h"));
@@ -2398,24 +1731,11 @@ mod tests {
     #[test]
     fn no_quota_is_explained_and_a_quota_is_not_contradicted() {
         let p = palette();
-        // A reason has to be named: the tab says which of the three it is,
-        // so a fixture that leaves it at "nothing is missing" is asking for
-        // a sentence there is no cause to print.
-        let empty = antigravity_body(
-            &Data {
-                tier_why: Missing::NoAnswer,
-                ..Data::default()
-            },
-            90,
-            &p,
-        )
-        .join(" ");
+        let empty = antigravity_body(&Data::default(), 90, &p).join(" ");
         assert!(empty.contains("no quota either"));
-        assert!(empty.contains("no tier"));
         let with = antigravity_body(
             &Data {
                 quota: groups(&[("Gemini 3 Pro", "weekly", 0.5)]),
-                live: Some(serde_json::json!({"currentTier": {"id": "free-tier"}})),
                 ..Data::default()
             },
             90,
@@ -2424,60 +1744,6 @@ mod tests {
         .join(" ");
         assert!(with.contains("No per-token usage is recorded locally"));
         assert!(!with.contains("no quota either"));
-        assert!(!with.contains("no tier"));
-    }
-
-    #[test]
-    fn each_missing_tier_asks_for_something_different() {
-        // The line this replaced offered "expired or the call failed" for
-        // all three, which is two causes, no commitment and nothing to do.
-        let signed_out = tier_note(Missing::NotSignedIn);
-        let lapsed = tier_note(Missing::Expired(3.0 * 3600.0));
-        let silent = tier_note(Missing::NoAnswer);
-        for note in [&signed_out, &lapsed, &silent] {
-            assert!(note.starts_with("no tier · "), "{:?}", note);
-            assert!(note.trim_end().ends_with('.'), "not a sentence: {:?}", note);
-        }
-        assert!(signed_out.contains("not signed in"), "{}", signed_out);
-        assert!(lapsed.contains("3h"), "the age is the useful part: {}", lapsed);
-        assert!(silent.contains("Google"), "{}", silent);
-        // and each is a different sentence, which is the whole point
-        assert_ne!(signed_out, lapsed);
-        assert_ne!(lapsed, silent);
-        assert_ne!(signed_out, silent);
-        // nothing missing says nothing
-        assert!(tier_note(Missing::Nothing).is_empty());
-    }
-
-    #[test]
-    fn the_subscription_states_both_tiers_when_they_disagree() {
-        let p = palette();
-        let d = Data {
-            live: Some(serde_json::json!({
-                "currentTier": {"id": "free-tier", "name": "Gemini Code Assist for individuals"},
-                "paidTier": {"name": "Google AI Ultra"},
-                "cloudaicompanionProject": "example-project",
-            })),
-            auth: "oauth-personal".into(),
-            ..Data::default()
-        };
-        let shown = antigravity_plan_rows(&d, 90, &p).join(" ");
-        assert!(shown.contains("Gemini Code Assist for individuals"));
-        assert!(shown.contains("free-tier"));
-        assert!(shown.contains("Google AI Ultra"));
-        assert!(shown.contains("example-project"));
-        assert!(shown.contains("oauth-personal"));
-    }
-
-    #[test]
-    fn no_tier_at_all_draws_no_subscription_block() {
-        let p = palette();
-        assert!(antigravity_plan_rows(&Data::default(), 90, &p).is_empty());
-        let hollow = Data {
-            live: Some(serde_json::json!({"currentTier": {}, "paidTier": {}})),
-            ..Data::default()
-        };
-        assert!(antigravity_plan_rows(&hollow, 90, &p).is_empty());
     }
 
     #[test]
@@ -2524,79 +1790,32 @@ mod tests {
                 ("Gemini 3 Pro", "weekly", 0.25),
                 ("Gemini 3 Pro", "5h", 0.996),
             ]),
-            live: Some(serde_json::json!({
-                "currentTier": {"id": "free-tier", "name": "Gemini Code Assist for individuals"},
-                "paidTier": {"name": "Google AI Ultra"},
-            })),
-            auth: "oauth-personal".into(),
             sessions: 9,
             counted: 7,
             steps: 1234.0,
             prompts: 42,
             prompts_history: Default::default(),
             last: now() - 3600.0,
-            tier_why: Missing::Nothing,
-            tier_said: String::new(),
-            local_refused: false,
-            gemini: Vec::new(),
-            gemini_why: String::new(),
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");
-            for want in ["QUOTA", "ACTIVITY", "SUBSCRIPTION"] {
+            for want in ["QUOTA", "ACTIVITY"] {
                 assert!(plain.contains(want), "{} missing at width {}", want, w);
             }
         }
-        // Google's summary behind a refusing server, with the per-model
-        // Gemini rows: the longest model id is wider than a narrow pane's
-        // whole bar, and the two notes are prose. No row may outgrow the
-        // pane, or the terminal wraps it and scrolls the title away.
-        let google = Data {
-            quota: google_summary(),
-            quota_from: From::Google,
-            local_refused: true,
-            gemini: vec![model("gemini-3.5-flash-extra-low", 0.5), model("gemini-3-flash", 1.0)],
-            ..d.clone()
-        };
+        // Both of `agy`'s groups, with their descriptions as prose. No row
+        // may outgrow the pane, or the terminal wraps it and scrolls the
+        // title away.
+        let agy = Data { quota: agy_report(), quota_from: From::Agy, ..d.clone() };
         for w in [20usize, 26, 40, 80, 200] {
-            let rows = tab(&google, w, 40, &cfg, &p);
+            let rows = tab(&agy, w, 40, &cfg, &p);
             let plain = rows.join("\n");
-            // Fitting is not enough: a row can fit by having its reading
-            // clipped off the end. Every model's name and its percentage
-            // must survive at every width.
-            for want in ["QUOTA", "Gemini, per model", "ACTIVITY", "50%"] {
+            for want in ["QUOTA", "ACTIVITY"] {
                 assert!(plain.contains(want), "{} missing at width {}", want, w);
             }
-            // A name may be broken across rows below its width, but every
-            // character of it must be on screen.
-            let visible = |s: &str| {
-                let mut out = String::new();
-                let mut rest = s.chars();
-                while let Some(c) = rest.next() {
-                    if c == '\u{1b}' {
-                        for c in rest.by_ref() {
-                            if c == 'm' {
-                                break;
-                            }
-                        }
-                    } else {
-                        out.push(c);
-                    }
-                }
-                out
-            };
-            let joined: String = rows.iter().map(|r| visible(r).trim().to_string()).collect();
-            for name in ["gemini-3.5-flash-extra-low", "gemini-3-flash"] {
-                assert!(joined.contains(name), "{} cut at width {}: {}", name, w, plain);
+            if w >= 40 {
+                assert!(plain.contains("70%"), "a reading was clipped at width {}: {}", w, plain);
             }
-            let section: Vec<&String> = rows
-                .iter()
-                .skip_while(|r| !r.contains("Gemini, per model"))
-                .take_while(|r| !r.is_empty())
-                .collect();
-            let readings = section.iter().filter(|r| r.contains('%')).count();
-            assert_eq!(readings, 2, "a Gemini reading was clipped at width {}: {}", w, plain);
-            assert!(section.iter().any(|r| r.contains("50%")), "width {}: {}", w, plain);
             for row in &rows {
                 assert!(
                     tc::display_width(row) < w,
@@ -2624,7 +1843,7 @@ fn antigravity_quota_rows(
     w: usize,
     p: &Palette,
 ) -> Vec<String> {
-    antigravity_quota_rows_with_plots(groups, from, false, w, p, &mut Vec::new())
+    antigravity_quota_rows_with_plots(groups, from, w, p, &mut Vec::new())
 }
 
 #[cfg(test)]
