@@ -1374,9 +1374,9 @@ mod tests {
         let samples = vec![s(A + H, 60.0, Some(A + WEEK), None), s(A + H + 10.0 * M, 0.0, Some(A + 2.0 * WEEK), None)];
         let mut i = input(&samples, &[], &[]);
         i.effect_override = Some("restarted");
-        for e in detect(&i) {
-            assert_ne!(evidence(&e)["effect"]["source"], "config", "{e:?}");
-        }
+        let e = one(&i);
+        assert_eq!(e.effect, CycleEffect::Unknown);
+        assert_eq!(evidence(&e)["effect"]["source"], "none");
     }
 
     #[test]
