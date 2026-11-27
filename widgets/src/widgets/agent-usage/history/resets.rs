@@ -239,9 +239,12 @@ impl Pair<'_> {
         self.plan_changed || self.limit_changed || self.window_changed
     }
 
-    /// A signal of its own, bank aside.
+    /// A signal of its own, bank aside. A jump in the instant counts as
+    /// `verdict` counts it: offline only, since while watching a reset
+    /// would have come with a fall, and a date moving on its own is the
+    /// boundary moving, not evidence to hand a spent credit to.
     fn signal(&self, dated: bool) -> bool {
-        self.due_end.is_some() || (dated && (self.pct_fall || (self.jump && !self.idle)))
+        self.due_end.is_some() || (dated && (self.pct_fall || (self.jump && !self.idle && !self.watching)))
     }
 
     /// Whether this pair may take a spent credit as its own reset. While
@@ -1229,6 +1232,22 @@ mod tests {
         // Nor while watching, when a reset would have read as a fall.
         let watching = vec![wk(A + H, 30.0), s(A + H + 10.0 * M, 31.0, Some(A + WEEK + 24.0 * H), Some(WEEK))];
         assert_eq!(verdicts(&input(&watching, &[], &[])), vec![Verdict::BoundaryMoved]);
+        // CodeRabbit's case: nor when a credit spent in the same stretch
+        // overlaps it. The jump alone handed the pair the credit, and the
+        // boundary moving became a banked restart that split the history.
+        let banks = vec![
+            bank(A + H - M, vec![credit("c1", "available", Some(FAR))]),
+            bank(A + H + 11.0 * M, vec![credit("c1", "spent", Some(FAR))]),
+        ];
+        let i = input(&watching, &banks, &[]);
+        assert_eq!(verdicts(&i), vec![Verdict::BoundaryMoved], "{:#?}", judge(&i));
+        // Offline, the same jump is evidence of its own and may take it.
+        let offline = vec![wk(A + H, 30.0), s(A + 3.0 * H, 31.0, Some(A + WEEK + 24.0 * H), Some(WEEK))];
+        let banks = vec![
+            bank(A + H - M, vec![credit("c1", "available", Some(FAR))]),
+            bank(A + 3.0 * H + M, vec![credit("c1", "spent", Some(FAR))]),
+        ];
+        assert_eq!(one(&input(&offline, &banks, &[])).kind, ResetKind::Banked);
     }
 
     #[test]
