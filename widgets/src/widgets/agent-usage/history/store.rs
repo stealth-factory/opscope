@@ -3436,6 +3436,40 @@ mod tests {
     }
 
     #[test]
+    fn a_backfill_reset_beside_a_live_reading_is_not_thinned_away() {
+        // CodeRabbit's case: rollouts at 1000 (90%), 1400 (0%) and 1600
+        // (0%), and a live 90% stored at 1300. The pre-pass dropped 1600 as
+        // within five minutes of 1400; the replay then refused 1400 as
+        // within five minutes of 1300, and the zero - the reset - was lost.
+        let p = temp("backfill-thin");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let end = a + 3.0 * 86_400.0;
+        h.record(&[obs(vec![lane("secondary_window", 90.0, a + 1300.0, end, WEEK)])], &t, a + 1300.0)
+            .unwrap();
+        let key = obs(vec![]).account_key();
+        let rows = vec![
+            replayed(a + 1000.0, 90.0, end),
+            replayed(a + 1400.0, 0.0, end),
+            replayed(a + 1600.0, 0.0, end),
+        ];
+        // As collect hands them over: in order, and not thinned.
+        h.replay("codex", &key, "CODEX", &rows, &t, a + 2000.0).unwrap();
+        let s = h.samples("codex", &key, "secondary_window").unwrap();
+        let got: Vec<(f64, Option<f64>)> = s.iter().map(|x| (x.at - a, x.pct)).collect();
+        assert_eq!(got, vec![(1000.0, Some(90.0)), (1300.0, Some(90.0)), (1600.0, Some(0.0))]);
+        // And into a store with no live readings it writes what the write
+        // rule alone keeps.
+        let q = temp("backfill-alone");
+        let mut g = History::open(&q).unwrap();
+        g.replay("codex", &key, "CODEX", &rows, &t, a + 2000.0).unwrap();
+        let alone: Vec<f64> = g.samples("codex", &key, "secondary_window").unwrap().iter().map(|x| x.at).collect();
+        let model: Vec<f64> = backfill::thin(rows).iter().map(|r| r.sample.at).collect();
+        assert_eq!(alone, model);
+    }
+
+    #[test]
     fn only_one_pane_claims_the_backfill() {
         let p = temp("claim");
         let mut one = History::open(&p).unwrap();

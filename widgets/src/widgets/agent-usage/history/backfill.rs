@@ -45,8 +45,10 @@
 //! only, as the live lane reads it.
 //!
 //! **How much.** Rollouts write a snapshot on every turn, many a minute, so
-//! the replay is thinned by the §3.7 write rule before it is written ([`thin`]),
-//! and then written through the same rule against what is already stored.
+//! the replay is written through the §3.7 write rule once, oldest first per
+//! pool, against what is already stored and what it has just written
+//! together - never thinned on its own first, or a reading the pre-pass
+//! dropped could be the reset a live reading beside it then needed.
 //! `(pool_id, at)` is the sample's key, so a snapshot already in the file is
 //! not written twice, and a re-run writes nothing new.
 //!
@@ -66,6 +68,7 @@
 //! **Not read.** Rollouts Codex has compressed (`.jsonl.zst`) are counted and
 //! left alone: reading them needs a zstd decoder this build does not carry.
 
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -353,8 +356,9 @@ fn read_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> std::io:
 
 /// One rollout's readings for `account_id`, in file order and not thinned:
 /// sessions of one account run side by side, and a reading one file's
-/// thinning drops can be the one the merged readings need, so [`collect`]
-/// thins once, after merging. A file that stops reading part-way keeps what
+/// thinning drops can be the one the merged readings need, so the write
+/// rule is applied once, to the merged readings, by the replay. A file that
+/// stops reading part-way keeps what
 /// it read before, and is counted.
 fn read_rollout(path: &Path, account_id: &str, stats: &mut Stats) -> Vec<Replayed> {
     let mut scan = Scan {
@@ -433,7 +437,13 @@ pub fn rollout_roots() -> Vec<PathBuf> {
 }
 
 /// Every rate-limit reading the rollouts under `roots` hold for the account
-/// `account_id`, thinned, oldest first within each pool.
+/// `account_id`, oldest first within each pool.
+///
+/// Not thinned here: [`History::replay`](super::store::History::replay)
+/// applies the write rule once, against the stored readings and these
+/// together. Thinned first, a reading the pre-pass dropped could be the one
+/// that showed a reset, after a live reading beside it made the replay
+/// refuse the one the pre-pass kept.
 pub fn collect(account_id: &str, roots: &[PathBuf]) -> (Vec<Replayed>, Stats) {
     let mut stats = Stats::default();
     if account_id.is_empty() {
@@ -445,13 +455,22 @@ pub fn collect(account_id: &str, roots: &[PathBuf]) -> (Vec<Replayed>, Stats) {
         stats.files += 1;
         rows.extend(read_rollout(path, account_id, &mut stats));
     }
-    (thin(rows), stats)
+    (in_order(rows), stats)
+}
+
+/// Per pool, oldest first, so each reading meets the ones before it as
+/// stored neighbours.
+fn in_order(mut rows: Vec<Replayed>) -> Vec<Replayed> {
+    rows.sort_by(|a, b| a.pool_key.cmp(&b.pool_key).then(a.sample.at.total_cmp(&b.sample.at)));
+    rows
 }
 
 /// The §3.7 write rule over a replay: per pool, oldest first, a reading is
 /// kept when the one kept before it is at least five minutes earlier and it
 /// changed something or an hour has passed. Two readings at one instant are
-/// one.
+/// one. What a replay writes into a store with no live readings, kept as
+/// the model its tests check.
+#[cfg(test)]
 pub fn thin(rows: Vec<Replayed>) -> Vec<Replayed> {
     let mut by_pool: BTreeMap<String, Vec<Replayed>> = BTreeMap::new();
     for r in rows {
@@ -899,11 +918,61 @@ mod tests {
         )
         .unwrap();
         let (rows, _) = collect(ACCT, &[root]);
-        let kept: Vec<(f64, Option<f64>)> = rows
+        // Merged in order, and the write rule over the merge (the replay's,
+        // modelled by `thin`) keeps the reset.
+        let kept: Vec<(f64, Option<f64>)> = thin(rows)
             .iter()
             .map(|r| (r.sample.at - 1_790_000_000.0, r.sample.pct))
             .collect();
         assert_eq!(kept, vec![(1000.0, Some(90.0)), (1400.0, Some(0.0))]);
+    }
+
+    #[test]
+    fn a_rollout_reset_beside_a_live_reading_survives_the_replay() {
+        // CodeRabbit's case, end to end: rollouts at 1000 (90%), 1400 (0%)
+        // and 1600 (0%), with a live 90% already stored at 1300. Thinned
+        // before the replay, 1600 went as within five minutes of 1400; the
+        // replay refused 1400 as within five of 1300; the zero was lost.
+        use crate::history::store::{History, FILE};
+        let root = temp_dir("beside-live");
+        let base = 1_790_000_000.0;
+        let stamp = |secs: i64| {
+            chrono::DateTime::from_timestamp(base as i64 + secs, 0)
+                .unwrap()
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string()
+        };
+        let reset = 1_790_100_000;
+        std::fs::write(
+            root.join("rollout-a.jsonl"),
+            [meta(Some(ACCT)), snap(&stamp(1000), 90.0, reset), snap(&stamp(1400), 0.0, reset), snap(&stamp(1600), 0.0, reset)]
+                .join("\n"),
+        )
+        .unwrap();
+        let (rows, _) = collect(ACCT, std::slice::from_ref(&root));
+        let pool = rows[0].pool_key.clone();
+        let mut h = History::open(&root.join(FILE)).unwrap();
+        let t = crate::history::Thresholds::default();
+        let live = crate::history::Observation {
+            provider: "codex".into(),
+            account_id: ACCT.into(),
+            lanes: vec![crate::shared::Lane {
+                label: rows[0].label.clone(),
+                pct: 90.0,
+                window_secs: rows[0].sample.window_secs,
+                reset: rows[0].sample.reset_at,
+                pool_key: pool.clone(),
+                fetched_at: base + 1300.0,
+                ..crate::shared::Lane::default()
+            }],
+            ..crate::history::Observation::default()
+        };
+        h.record(&[live.clone()], &t, base + 1300.0).unwrap();
+        let key = live.account_key();
+        h.replay("codex", &key, "CODEX", &rows, &t, base + 2000.0).unwrap();
+        let got: Vec<(f64, Option<f64>)> =
+            h.samples("codex", &key, &pool).unwrap().iter().map(|s| (s.at - base, s.pct)).collect();
+        assert_eq!(got, vec![(1000.0, Some(90.0)), (1300.0, Some(90.0)), (1600.0, Some(0.0))]);
     }
 
     #[test]
