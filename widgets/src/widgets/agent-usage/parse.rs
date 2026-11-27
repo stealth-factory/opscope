@@ -1651,9 +1651,19 @@ pub fn parse_claude_bank_raw(text: &str, at: f64) -> Option<crate::history::Bank
         let Some(grant) = grant.as_object() else {
             continue;
         };
-        let count = grant.get("resets_left").and_then(whole_count).unwrap_or(0).min(MOST_RESETS);
         let usable = grant.get("usable_now").and_then(|v| v.as_bool()) == Some(true)
             && grant.get("paused").and_then(|v| v.as_bool()) != Some(true);
+        // A count that is there and unreadable makes the bank unread, as it
+        // does on the tab: recorded as zero, it was a measured empty bank
+        // standing over a known inventory in the history. A usable grant
+        // with no count at all is unread the same way; an unusable one
+        // without one holds nothing the bank could count.
+        let count = match grant.get("resets_left") {
+            Some(value) => whole_count(value)?,
+            None if usable => return None,
+            None => 0,
+        }
+        .min(MOST_RESETS);
         let id = grant.get("id").and_then(|v| v.as_str()).map(str::to_string);
         let expires_at = grant.get("ends_at").and_then(|v| v.as_str()).and_then(iso_epoch);
         for n in 0..count {
@@ -1766,6 +1776,20 @@ mod history_parse_tests {
         assert_eq!(c[2].status, "unavailable");
         assert!(parse_claude_bank_raw(r#"{"cedar_ember":{"eligible":false}}"#, 5.0).is_none());
         assert!(parse_claude_bank_raw(r#"{"limits":[]}"#, 5.0).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_reset_count_is_an_unread_bank_not_an_empty_one() {
+        // The tab already reads this grant as unreadable; the history read
+        // it as a measured zero and stored an empty bank.
+        let text = r#"{"cedar_ember":{"eligible":true,"grants":[{"resets_left":"2","usable_now":true}]}}"#;
+        assert!(parse_claude_bank_raw(text, 5.0).is_none());
+        let text = r#"{"cedar_ember":{"eligible":true,"grants":[{"usable_now":true}]}}"#;
+        assert!(parse_claude_bank_raw(text, 5.0).is_none());
+        // A stated zero is a reading, and still the empty bank it says.
+        let text = r#"{"cedar_ember":{"eligible":true,"grants":[{"resets_left":0,"usable_now":true}]}}"#;
+        let b = parse_claude_bank_raw(text, 5.0).unwrap();
+        assert_eq!((b.left, b.credits.map(|c| c.len())), (0, Some(0)));
     }
 
     #[test]
