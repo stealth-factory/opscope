@@ -497,6 +497,27 @@ pub fn history_lanes(d: &Data) -> Vec<Lane> {
     let Some(c) = d.credits.as_ref() else {
         return out;
     };
+    // The summary draws no bar for an empty pool, but an empty pool read
+    // live is a reading: without it, the last grant lapsing never reaches
+    // the history, and a later grant reads as a top-up from where the
+    // lapsed one stood. A kept (cached) answer is not live and adds none.
+    if d.kept.is_none() {
+        for (label, key, pool) in [("credits", "purchased", &c.purchased), ("bonus", "bonus", &c.bonus)] {
+            if pool.total <= 0.0 && !out.iter().any(|l| l.pool_key == key) {
+                out.push(Lane {
+                    label: label.into(),
+                    pct: 0.0,
+                    pool_key: key.into(),
+                    unit: Unit::Credits,
+                    role: PoolRole::Balance,
+                    used: Some(0.0),
+                    limit: Some(0.0),
+                    fetched_at: d.credits_at,
+                    ..Lane::default()
+                });
+            }
+        }
+    }
     // Lapsed bonuses are already out of `grants`; a bought grant past its
     // date is still listed, and its expiry is no longer ahead of anything.
     let soonest = |kind: &str| {
@@ -1898,6 +1919,39 @@ mod tests {
         assert_eq!(bonus_moves(&[(&before, a), (&after, a + 4.0 * 3600.0)]), (30.0, 100.0));
         // With no expiry in the bracket, the same fall is all spend.
         assert_eq!(bonus_moves(&[(&before, a), (&after, a + 3600.0)]), (30.0, 0.0));
+    }
+
+    #[test]
+    fn the_last_bonus_lapsing_is_expiry_even_when_a_new_grant_follows() {
+        // Codex's second case on #681: an unused 100 lapses, the next answer
+        // holds no bonus at all, then a new 200 arrives. Without the empty
+        // reading the history saw 100 then 200: a 100 top-up and no expiry.
+        let a = 1_790_000_000.0;
+        let lapses = a + 2.0 * 3600.0;
+        let one = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":{lapses}}}]}}"#
+        );
+        let none = r#"{"total_usage_cents":0,"credit_grants":[]}"#;
+        let new = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"promotional","amount_cents":200,"remaining_cents":200,"expires_at_ts":{}}}]}}"#,
+            a + 40.0 * 86400.0
+        );
+        let moves = bonus_moves(&[(&one, a), (none, a + 4.0 * 3600.0), (&new, a + 5.0 * 86400.0)]);
+        assert_eq!(moves, (0.0, 100.0));
+    }
+
+    #[test]
+    fn an_empty_pool_is_recorded_only_from_a_live_answer() {
+        let a = 1_790_000_000.0;
+        let none = r#"{"total_usage_cents":0,"credit_grants":[]}"#;
+        let live = read_at(none, a);
+        let bonus = |d: &Data| history_lanes(d).into_iter().find(|l| l.pool_key == "bonus");
+        assert_eq!(bonus(&live).and_then(|l| l.limit), Some(0.0));
+        assert!(lanes(&live).iter().all(|l| l.pool_key != "bonus"), "the summary still draws no empty bar");
+        let kept = Data { kept: Some(Kept { at: a - 600.0, why: "timed out".into() }), ..read_at(none, a) };
+        assert!(bonus(&kept).is_none(), "a kept answer is not a reading of an empty pool");
     }
 
     #[test]

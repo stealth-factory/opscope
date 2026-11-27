@@ -263,8 +263,16 @@ impl History {
         };
         match role {
             Role::Balance => {
+                // A pool read only ever empty (Perplexity records an empty
+                // bonus so a last grant's lapse is seen) held nothing to
+                // chart. One that held a balance keeps its chart even when
+                // nothing moved: that it did not move is a reading.
+                let held = self
+                    .samples(provider, account_key, &row.key)?
+                    .iter()
+                    .any(|s| s.limit.unwrap_or(0.0) > 0.0 || s.used.unwrap_or(0.0) > 0.0);
                 let months = self.balance_months(provider, account_key, &row.key)?;
-                if months.is_empty() {
+                if months.is_empty() || !held {
                     return Ok(Vec::new());
                 }
                 out.total = months.len();

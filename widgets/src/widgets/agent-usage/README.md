@@ -2041,7 +2041,10 @@ goes:
   no cycle, so its chart is spend per calendar month, and says so. A
   balance that falls across a grant's stated expiry - a Perplexity bonus
   lapsing beside another - counts the fall as expired, not spent, up to
-  what the lapsed grant held; anything past that is still spend. Cursor's
+  what the lapsed grant held; anything past that is still spend. A pool
+  read live as empty is recorded too, so the last grant lapsing is expiry
+  rather than a gap, and a pool that has only ever been empty draws no
+  chart. Cursor's
   prepaid credit, Codex, Devin and Droid state no grant expiries, so their
   falls are all spend.
 
