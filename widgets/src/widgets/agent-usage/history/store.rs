@@ -1937,10 +1937,19 @@ fn refold_pool(tx: &Transaction, pool: i64, from: Option<f64>, t: &Thresholds) -
     .map_err(sql)?;
 
     let samples = load_samples(tx, pool, after)?;
+    // What reset detection pairs the first new reading with: the last live
+    // reading at or before the point, not the point itself. The point is
+    // where coverage resumes and can be a cached reading, which detection
+    // never pairs with, so the first live reading went unjudged - while the
+    // fold, resuming with the last live figure, closed the cycle on it. A
+    // full fold pairs the two live readings either side of the cached one.
     let before: Option<Sample> = match after {
         Some(at) => tx
             .query_row(
-                &format!("SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at = ?2"),
+                &format!(
+                    "SELECT {SAMPLE_COLS} FROM sample WHERE pool_id = ?1 AND at <= ?2 AND source != 'cached'
+                      ORDER BY at DESC LIMIT 1"
+                ),
                 params![pool, at],
                 sample_row,
             )
@@ -2964,6 +2973,52 @@ mod tests {
         refold_pool(&tx, pool, None, &t).unwrap();
         tx.commit().unwrap();
         (stored, read(h))
+    }
+
+    #[test]
+    fn a_resumed_fold_judges_a_reset_across_a_cached_reading_as_a_full_fold_does() {
+        // CodeRabbit's case: an undated pool reads 60% live, then a cached
+        // reading, then 0% live with a credit spent between. With
+        // kept_boundary configured a full fold adds an allowance; resumed
+        // from the cached reading, detection had no live reading to pair
+        // the 0% with, and the fold closed the cycle instead.
+        let p = temp("resume-cached");
+        let mut h = History::open(&p).unwrap();
+        let mut t = Thresholds::default();
+        t.reset_effect = super::super::resets::ResetEffects::from_config(&serde_json::json!({"codex": "kept_boundary"}));
+        let a = 1_000_000.0;
+        let undated = |pct: f64, at: f64, stale: bool| Lane {
+            label: "extra".into(),
+            pct,
+            pool_key: "undated".into(),
+            fetched_at: at,
+            stale,
+            ..Lane::default()
+        };
+        let credit = |status: &str| super::super::RawCredit {
+            id: Some("c1".into()),
+            status: status.into(),
+            expires_at: Some(9e9),
+        };
+        let mut o = obs(vec![undated(60.0, a, false)]);
+        o.bank = Some(BankReading { at: a, left: 1, credits: Some(vec![credit("available")]) });
+        h.record(std::slice::from_ref(&o), &t, a).unwrap();
+        // The credit is seen spent with the cached reading, so the pass that
+        // brings the 0% only appends, and the open cycle is resumed.
+        let mut o = obs(vec![undated(61.0, a + 10.0 * 60.0, true)]);
+        o.bank = Some(BankReading { at: a + 600.0, left: 0, credits: Some(vec![credit("spent")]) });
+        h.record(std::slice::from_ref(&o), &t, a + 600.0).unwrap();
+        let o = obs(vec![undated(0.0, a + 1200.0, false)]);
+        h.record(std::slice::from_ref(&o), &t, a + 1200.0).unwrap();
+        let pool: i64 = h.conn.query_row("SELECT id FROM pool WHERE pool_key = 'undated'", [], |r| r.get(0)).unwrap();
+        let stored: Vec<Cycle> = load_cycles(&h.conn, pool).unwrap().into_iter().map(|(_, c)| c).collect();
+        let tx = h.conn.transaction().unwrap();
+        refold_pool(&tx, pool, None, &t).unwrap();
+        tx.commit().unwrap();
+        let full: Vec<Cycle> = load_cycles(&h.conn, pool).unwrap().into_iter().map(|(_, c)| c).collect();
+        assert_eq!(full.len(), 1, "{full:#?}");
+        assert_eq!(full[0].allowances, 2, "the full fold kept the boundary");
+        assert_eq!(stored, full);
     }
 
     #[test]
