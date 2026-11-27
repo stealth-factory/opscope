@@ -811,7 +811,9 @@ fn money_bars(
     let shown = &values[values.len() - cells..];
     let height = 3;
     let columns: Vec<(f64, String)> = shown.iter().map(|v| (*v, p.agent.clone())).collect();
-    let plot = tc::Plot::bars(1 + lw + 1, rows.len(), &columns, height, limit, false);
+    // The range the axis names, so a new scale replaces the pixels with
+    // its label instead of waiting out the upload cap under it.
+    let plot = tc::Plot::bars(1 + lw + 1, rows.len(), &columns, height, limit, false).on_axis(0.0, limit);
     for r in 0..height {
         let label = if r == 0 { top.clone() } else { String::new() };
         let mut parts = gutter(&label, lw, if r == 0 { "┤" } else { "│" }, p);
