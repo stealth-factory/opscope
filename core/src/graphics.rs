@@ -496,11 +496,12 @@ impl Plot {
     /// Pixels draw the same parts at their exact heights.
     pub fn stacked_columns(x: usize, y: usize, columns: &[Column], height: usize, peak: f64) -> Self {
         let peak = if peak.is_finite() && peak > 0.0 { peak } else { 1.0 };
-        let clean = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
         let mut rects = Vec::new();
         let h = height as f64;
-        for (i, column) in columns.iter().enumerate() {
-            let x = i as f64;
+        // `clip` is where the column is cut: the plot's top, or a band's
+        // floor for the column under it. Heights are always on `peak`.
+        fn rects_of(column: &Column, x: f64, h: f64, peak: f64, clip: f64, rects: &mut Vec<Rect>) {
+            let clean = |v: f64| if v.is_finite() { v.max(0.0) } else { 0.0 };
             match column {
                 Column::Gap => {}
                 Column::Hollow(c) => rects.push(Rect { x: x + 0.35, y: h - 0.3, width: 0.3, height: 0.2, colour: c.clone() }),
@@ -508,15 +509,15 @@ impl Plot {
                 Column::Stack { parts, open } => {
                     let mut base = 0.0f64;
                     for (v, c) in parts {
-                        let lo = base.min(peak);
+                        let lo = base.min(clip);
                         base += clean(*v);
-                        let hi = base.min(peak);
+                        let hi = base.min(clip);
                         if hi > lo {
                             rects.push(Rect { x, y: h - hi / peak * h, width: 1.0, height: (hi - lo) / peak * h, colour: c.clone() });
                         }
                     }
                     if let Some(c) = open {
-                        let top = base.min(peak) / peak * h;
+                        let top = base.min(clip) / peak * h;
                         if top < h {
                             let bottom = (h - top - 0.15).max(0.0);
                             let tall = 0.45f64.min(bottom);
@@ -524,7 +525,18 @@ impl Plot {
                         }
                     }
                 }
+                Column::Band { base, from, height, colour } => {
+                    let from = from.clamp(0.0, clip);
+                    rects_of(base, x, h, peak, from, rects);
+                    let hi = (from + clean(*height)).min(clip);
+                    if hi > from {
+                        rects.push(Rect { x, y: h - hi / peak * h, width: 1.0, height: (hi - from) / peak * h, colour: colour.clone() });
+                    }
+                }
             }
+        }
+        for (i, column) in columns.iter().enumerate() {
+            rects_of(column, i as f64, h, peak, peak, &mut rects);
         }
         let no_colour = super::theme::no_color();
         let text = (0..height)
@@ -2105,12 +2117,30 @@ pub enum Column {
     Divider(String),
     /// Nothing at all.
     Gap,
+    /// `base` below `from` on the scale, and above it a band of its own: one
+    /// part of `height` in `colour`, standing on `from` rather than on the
+    /// top of `base`. A second figure on a scale of its own - a cycle's
+    /// spend over its use of the allowance - so equal amounts stand equally
+    /// tall whatever is under them, and a hollow `base` keeps its `·`.
+    /// `base` is cut at `from`; its open mark gives way to a band that is
+    /// drawn in the same cell.
+    Band { base: Box<Column>, from: f64, height: f64, colour: String },
 }
 
 /// One text cell of a [`Column`] between `bottom` and `top` on the scale:
 /// its ink (with a background where two parts share it) and its glyph.
 fn column_cell(column: &Column, top: f64, bottom: f64, peak: f64, floor: bool, no_colour: bool) -> (String, char) {
     match column {
+        Column::Band { base, from, height, colour } => {
+            let from = from.clamp(0.0, peak);
+            let hi = (from + height.max(0.0)).min(peak);
+            if hi > bottom && from < top && hi > from {
+                // Where the band ends in this cell, as a stack's top shows.
+                let k = (((hi.min(top) - bottom) / (top - bottom) * 8.0).round() as usize).clamp(1, 8);
+                return (colour.clone(), super::EIGHTHS[k]);
+            }
+            column_cell(base, top, bottom, from, floor, no_colour)
+        }
         Column::Gap => (String::new(), ' '),
         Column::Hollow(c) => (c.clone(), if floor { '·' } else { ' ' }),
         Column::Divider(c) => (c.clone(), '│'),
@@ -3521,6 +3551,32 @@ mod tests {
         assert_eq!(at(2, 4 * CELL_H - 1), &[220, 90, 80]);
         assert_eq!(at(2, CELL_H + 2), &[240, 200, 60]);
         assert_eq!(alpha_at(&px, w, 2, 2), 0, "nothing above 150");
+    }
+
+    #[test]
+    fn a_band_stands_on_its_own_floor_whatever_is_under_it() {
+        let low = super::super::rgb(220, 90, 80);
+        let money = super::super::rgb(60, 160, 240);
+        let dim = super::super::rgb(120, 120, 120);
+        // 0-150 in three rows of 50, and a band from 100 to 150: the same
+        // 25 over a column of 90 and over a hollow one reaches 125 in both.
+        let band = |base: Column| Column::Band { base: Box::new(base), from: 100.0, height: 25.0, colour: money.clone() };
+        let columns = vec![
+            band(Column::Stack { parts: vec![(90.0, low.clone())], open: None }),
+            band(Column::Hollow(dim.clone())),
+            band(Column::Stack { parts: vec![(30.0, low.clone())], open: None }),
+        ];
+        let plot = Plot::stacked_columns(0, 0, &columns, 3, 150.0);
+        let cells = |r: usize| -> String { plot.text_row(r).iter().map(|(_, t)| t.as_str()).collect() };
+        assert_eq!(cells(0), "▄▄▄");
+        assert_eq!(cells(1), "▆  ");
+        assert_eq!(cells(2), "█·▅");
+        let px = pixels(&plot);
+        let w = 3 * CELL_W;
+        // The band's pixels are the same height in every column.
+        let top_of = |col: usize| (0..3 * CELL_H).find(|y| alpha_at(&px, w, col * CELL_W + CELL_W / 2, *y) != 0);
+        assert_eq!(top_of(0), top_of(1));
+        assert_eq!(top_of(1), top_of(2));
     }
 
     #[test]

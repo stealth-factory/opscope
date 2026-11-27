@@ -514,6 +514,8 @@ let cycles = tc::Plot::stacked_columns(x, y, &[
     tc::Column::Stack { parts: vec![(100.0, used), (40.0, past_one)], open: None },
     tc::Column::Hollow(dim.clone()),
     tc::Column::Divider(grid.clone()),
+    // A second figure on its own floor: `base` below `from`, the band above.
+    tc::Column::Band { base: Box::new(tc::Column::Hollow(dim.clone())), from: 150.0, height: 20.0, colour: spend },
 ], height, peak);
 ```
 
@@ -525,7 +527,10 @@ parts share, and any shared cell under `NO_COLOR` or with an upper colour that
 is not truecolour are drawn in one colour - the part holding most of the cell -
 as an eighth block of the height they reach together, so text never shows more
 of a cell filled than the pixels do. Callers must not rely on two parts being
-told apart by colour in text; the widget's lines carry what each part was. The marks are glyphs in text and small strokes in pixels, and the
+told apart by colour in text; the widget's lines carry what each part was. A
+`Band` draws a second figure from a floor of its own (`from`) rather than on top
+of the stack, so a cycle's spend reads against the money row's label whatever
+the cycle used; the column under it is cut at `from`. The marks are glyphs in text and small strokes in pixels, and the
 widget states every one of them in its text lines too.
 
 Bars do not interpolate between buckets. GitHub contributions and agent-usage's

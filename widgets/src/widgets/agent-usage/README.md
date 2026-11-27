@@ -2016,9 +2016,11 @@ goes:
 - **One bar per cycle**, on a 0-100 scale of one allowance. A cycle that used
   more than one allowance - a reset refilled it - carries on above 100 in a
   second shade. Spend past the allowance (Claude's extra usage, Cursor's
-  on-demand) sits on top in its own colour and its own unit, with the money at
-  the top of the scale: it is never drawn as a percentage of an allowance it
-  is not part of.
+  on-demand) has a row of its own at the top, in its own colour and its own
+  unit: each cycle's spend stands on that row's floor, scaled to the amount
+  its label names, so equal amounts stand equally tall whatever the cycle
+  used, and a cycle nobody saw (`·`) still shows what it spent. It is never
+  drawn as a percentage of an allowance it is not part of.
 - **Marks.** Under a bar, `↺` with `B` for a banked reset, `I` for one the
   provider issued and `?` for one nobody can tell; a cut-short cycle carries
   the mark of the reset that restarted it. A hollow `·` is a cycle nobody saw.

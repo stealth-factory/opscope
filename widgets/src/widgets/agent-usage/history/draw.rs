@@ -632,6 +632,11 @@ fn cycles_rows(
         };
         let most_spend = shown.iter().map(|b| spend(b)).fold(0.0, f64::max);
         let band = most_spend > 0.0;
+        // The money row is a scale of its own, from its own floor at the top
+        // of the percentages to the amount its label names - the largest
+        // spend rounded up, as the spend chart is - so equal amounts stand
+        // equally tall over any cycle, a seen one or a hollow one.
+        let money_top = most_spend.ceil().max(f64::MIN_POSITIVE);
         let height = pct_rows + band as usize;
         let peak = pct_axis + if band { step } else { 0.0 };
         let columns: Vec<tc::Column> = slots
@@ -640,21 +645,32 @@ fn cycles_rows(
                 Slot::Divider => tc::Column::Divider(p.grid.clone()),
                 Slot::Cycle(i) => {
                     let b = &bars[*i];
-                    if b.cycle.is_hollow() {
-                        return tc::Column::Hollow(p.dim.clone());
-                    }
-                    let v = consumed(&b.cycle).unwrap_or(0.0);
-                    let mut parts = vec![(v.min(100.0), tc::heat(v.min(100.0) / 100.0))];
-                    if v > 100.0 {
-                        parts.push((v - 100.0, p.warn.clone()));
-                    }
+                    let use_of = if b.cycle.is_hollow() {
+                        tc::Column::Hollow(p.dim.clone())
+                    } else {
+                        let v = consumed(&b.cycle).unwrap_or(0.0);
+                        let mut parts = vec![(v.min(100.0), tc::heat(v.min(100.0) / 100.0))];
+                        if v > 100.0 {
+                            parts.push((v - 100.0, p.warn.clone()));
+                        }
+                        tc::Column::Stack {
+                            parts,
+                            open: lower_bound(&b.cycle).then(|| p.dim.clone()),
+                        }
+                    };
+                    // Spend known for a cycle whose use nobody read is still
+                    // drawn: the `·` says the allowance went unread, not that
+                    // nothing was spent.
                     let money = spend(b);
                     if money > 0.0 {
-                        parts.push((money / most_spend * step, p.agent.clone()));
-                    }
-                    tc::Column::Stack {
-                        parts,
-                        open: lower_bound(&b.cycle).then(|| p.dim.clone()),
+                        tc::Column::Band {
+                            base: Box::new(use_of),
+                            from: pct_axis,
+                            height: money / money_top * step,
+                            colour: p.agent.clone(),
+                        }
+                    } else {
+                        use_of
                     }
                 }
             })
@@ -665,7 +681,7 @@ fn cycles_rows(
             let value = peak - r as f64 * step;
             let label = if band && r == 0 {
                 unit.as_ref()
-                    .map(|(u, c)| scale_text(u, c.as_deref(), most_spend))
+                    .map(|(u, c)| scale_text(u, c.as_deref(), money_top))
                     .unwrap_or_default()
             } else if r == usize::from(band) || value == 100.0 || value == 50.0 {
                 format!("{:.0}", value)
@@ -1211,6 +1227,43 @@ mod tests {
         assert!(plain(&rows[0]).contains("5┤"), "{rows:?}");
         let top: String = plots[0].text_row(0).iter().map(|(_, g)| g.clone()).collect();
         assert!(!top.starts_with('█'), "a 4.5 bar under a 5 label filled the top row: {top:?}");
+    }
+
+    #[test]
+    fn equal_spend_stands_equally_tall_in_its_own_row_and_over_a_hollow_cycle() {
+        // CodeRabbit's two cases. The A$8.40 shown on the 140% cycle and on
+        // the 55% one was stacked on each, so it stood at 165 on one and
+        // below the 100 line on the other, read against an A$9 label. And a
+        // cycle nobody saw drew only its `·`, though its spend was counted.
+        let p = crate::palette();
+        let mut t = tab();
+        let Body::Cycles(bars) = &mut t.pools[0].body else { unreachable!() };
+        bars[5].over = vec![over(3, 2.0, false)];
+        let (_, plots) = draw(&t, 100);
+        let chart = &plots[0];
+        let cell = |r: usize, col: usize| -> (String, String) {
+            let mut seen = 0;
+            for (ink, text) in chart.text_row(r) {
+                for ch in text.chars() {
+                    if seen == col {
+                        return (ink.clone(), ch.to_string());
+                    }
+                    seen += 1;
+                }
+            }
+            panic!("no column {col} in row {r}");
+        };
+        // The money row is row 0: the same amount, the same glyph.
+        assert_eq!(cell(0, 3), cell(0, 4));
+        assert!(cell(0, 3).0.starts_with(&p.agent));
+        for r in 1..chart.height {
+            for col in [3, 4] {
+                assert!(!cell(r, col).0.starts_with(&p.agent), "money below its own row at {r},{col}");
+            }
+        }
+        // The hollow cycle keeps its dot and shows its spend.
+        assert!(cell(0, 5).0.starts_with(&p.agent), "{:?}", cell(0, 5));
+        assert_eq!(cell(chart.height - 1, 5).1, "·");
     }
 
     #[test]
