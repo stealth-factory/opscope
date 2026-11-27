@@ -95,6 +95,10 @@ struct Quota {
     /// `ts`, or the moment of the fetch. Not when it was read: the tab
     /// judges a reading by its age, and those are different numbers.
     taken: Option<f64>,
+    /// When the billing amounts were fetched, where that is not `taken`:
+    /// a billing answer with no percentage borrows the log's, and `taken`
+    /// is then the log line's. The on-demand spend is still the answer's.
+    billed_at: Option<f64>,
     kind: String,
     start: String,
     end: String,
@@ -280,6 +284,7 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
             pct: val_of(&cfg["creditUsagePercent"]),
             products: products_of(cfg),
             taken: iso_epoch(&text(&d, "ts")),
+            billed_at: None,
             kind: text(period, "type"),
             start,
             end,
@@ -389,6 +394,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config, raw: Option<&str>) -> (Option<Qu
                     match from_log() {
                         Some(l) if l.start == q.start && l.end == q.end => {
                             q.pct = l.pct;
+                            q.billed_at = q.taken;
                             q.taken = l.taken;
                         }
                         // No reason recorded here on purpose. The row that
@@ -1175,6 +1181,7 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         },
         products: products_of(cfg),
         taken: Some(now()),
+        billed_at: None,
         kind: text(period, "type"),
         start,
         end,
@@ -1267,13 +1274,15 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     // cap: a percentage of an unnamed ceiling is not a number anyone can
     // act on, and this one is dollars.
     if let Some((pct, cap)) = on_demand_lane(q) {
+        let billed = q.billed_at.or(q.taken);
         out.push(Lane {
             label: format!("on-demand{}", cap_tag(cap)),
             pct,
             window_secs,
             reset,
-            // The same reading, so the same age.
-            stale,
+            // The billing answer's age: the percentage beside it may be a
+            // log line's.
+            stale: reading_is_old(billed),
             projected,
             apart: false,
             pool_key: "on_demand".into(),
@@ -1281,7 +1290,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             role: PoolRole::Overage,
             used: Some(q.on_demand_used.unwrap_or(0.0)),
             limit: Some(cap),
-            fetched_at: q.taken.unwrap_or(0.0),
+            fetched_at: billed.unwrap_or(0.0),
         });
     }
     out
@@ -2177,6 +2186,7 @@ mod tests {
             pct: Some(80.0),
             products: Vec::new(),
             taken: Some(now() - (GROK_FRESH_FOR + 60.0)),
+            billed_at: None,
             kind: "USAGE_PERIOD_TYPE_WEEKLY".into(),
             start: stamp(start),
             end: stamp(end),
@@ -2240,6 +2250,23 @@ mod tests {
         // And the tab agrees with it, figures and all.
         let rows = grok_tab(&d, 90, &palette()).join(" ");
         assert!(rows.contains("on-demand $3 of $25"), "{}", rows);
+    }
+
+    #[test]
+    fn a_percentage_borrowed_from_the_log_leaves_the_billing_spend_its_own_time() {
+        // CodeRabbit's case: the billing answer carried on-demand spend and
+        // no percentage, and a same-window log line with no `ts` supplied
+        // the percentage. The on-demand spend took the log's missing time,
+        // went to the history dated nought, and the store skipped it.
+        let mut q = newest_quota([LOG_LINE].into_iter()).expect("a reading");
+        q.taken = None;
+        q.billed_at = Some(1_000_000.0);
+        let d = Data { ok: true, quota: Some(q), ..Default::default() };
+        let got = lanes(&d);
+        let paid = got.iter().find(|l| l.pool_key == "on_demand").expect("an on-demand lane");
+        assert_eq!(paid.fetched_at, 1_000_000.0);
+        let credits = got.iter().find(|l| l.pool_key == "credits").expect("a credits lane");
+        assert_eq!(credits.fetched_at, 0.0, "the log's percentage keeps the log's time");
     }
 
     #[test]
