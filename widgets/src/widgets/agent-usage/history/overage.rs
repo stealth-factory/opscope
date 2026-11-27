@@ -592,7 +592,10 @@ pub mod read {
             }
         }
         let last = *days.last()?;
-        let agree = days.iter().all(|d| d.abs_diff(last) <= 1);
+        // All within one day of each other, not each within one of the
+        // last: 14, 16 and 15 do not agree on a day, whatever the last says.
+        let (lo, hi) = (days.iter().min()?, days.iter().max()?);
+        let agree = hi - lo <= 1;
         (days.len() >= 2 && agree).then_some(RollDay {
             day: last,
             seen: days.len(),
@@ -1085,6 +1088,39 @@ mod tests {
         assert_eq!(rd.day, 15);
         // One boundary is not enough.
         assert_eq!(roll_day(&out.cycles[..2], |_| 15), None);
+    }
+
+    #[test]
+    fn roll_days_more_than_a_day_apart_name_no_day() {
+        // CodeRabbit's case: boundaries on the 14th, 16th and 15th are each
+        // within a day of the last, and read as three rolls on the 15th.
+        let a = 1_000_000.0;
+        let day = |n: f64| a + n * DAY;
+        let mut samples = Vec::new();
+        for start in [0.0, 30.0, 60.0, 90.0] {
+            samples.push(money(day(start) + 2.0 * H, 5.0, 50.0, None, None));
+            samples.push(money(day(start + 14.0), 20.0, 50.0, None, None));
+            samples.push(money(day(start + 14.0) + H, 0.0, 50.0, None, None));
+        }
+        let out = fold::fold(&FoldInput {
+            role: Role::Overage,
+            samples: &samples,
+            plans: &[],
+            resets: &[],
+            prev: None,
+            next_ordinal: 1,
+            rolling_seed: None,
+            resume: None,
+            gone_at: None,
+            thresholds: t(),
+        });
+        assert_eq!(out.cycles.len(), 5);
+        let named = |days: [u32; 4]| {
+            move |at: f64| days[(((at - a) / DAY) / 30.0) as usize]
+        };
+        assert_eq!(roll_day(&out.cycles[..4], named([14, 16, 15, 0])), None);
+        let rd = roll_day(&out.cycles[..4], named([14, 15, 15, 0])).unwrap();
+        assert_eq!((rd.day, rd.seen), (15, 3));
     }
 
     #[test]
