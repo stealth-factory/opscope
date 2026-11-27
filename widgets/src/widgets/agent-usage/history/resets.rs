@@ -282,6 +282,12 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     // The cycle's end as the fold sees it: the latest stated instant, from
     // any reading - a cached one can close a cycle on schedule.
     let mut end: Option<f64> = None;
+    // The end as it stood at the last live reading. A cached reading after
+    // it can state the next window's end, and judged against that alone
+    // the old end was never reached, so the first live reading of the new
+    // window read as a fall - a restart at the start of the cycle the fold
+    // had already opened on schedule.
+    let mut end_at_prev: Option<f64> = None;
     for &n in &all {
         if n.source != Source::Cached {
             if let Some(p) = prev {
@@ -304,7 +310,9 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
                     n,
                     watching,
                     tol,
-                    due_end: end.filter(|e| fold::rolled_over(*e, n, tol, tol)),
+                    due_end: end
+                        .filter(|e| fold::rolled_over(*e, n, tol, tol))
+                        .or_else(|| end_at_prev.filter(|e| fold::rolled_over(*e, n, tol, tol))),
                     plan_changed: fold::plan_change_between(input.plans, p.at, n.at).is_some(),
                     limit_changed: differs(p.limit, n.limit, 1e-9),
                     window_changed: differs(p.window_secs, n.window_secs, 1.0),
@@ -319,6 +327,9 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
         }
         if n.reset_at.is_some() {
             end = n.reset_at;
+        }
+        if n.source != Source::Cached {
+            end_at_prev = end;
         }
     }
 
@@ -1217,6 +1228,21 @@ mod tests {
         assert_eq!(e.effect, CycleEffect::Unknown);
         assert_eq!(e.signals, "instant_jump");
         assert_eq!(evidence(&e)["signals"]["instant_jump"], true);
+    }
+
+    #[test]
+    fn a_cached_reading_of_the_next_window_does_not_turn_the_rollover_into_a_restart() {
+        // CodeRabbit's case: 60% live eight minutes before E, the next
+        // window in a cached reading just after E, then 0% live in it. The
+        // live pair was checked only against the cached reading's new end,
+        // never reached, and the fall read as a restart at E.
+        let e = A + W5;
+        let mut cached = s(e + M, 2.0, Some(e + W5), Some(W5));
+        cached.source = Source::Cached;
+        let samples = vec![s(e - 8.0 * M, 60.0, Some(e), Some(W5)), cached, s(e + 5.0 * M, 0.0, Some(e + W5), Some(W5))];
+        let i = input(&samples, &[], &[]);
+        assert_eq!(verdicts(&i), vec![Verdict::Rollover], "{:#?}", judge(&i));
+        assert!(detect(&i).is_empty());
     }
 
     #[test]
