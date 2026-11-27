@@ -782,21 +782,31 @@ pub mod read {
             let Some(inc) = self.overage_pool(provider, account_key, included_pool_key)? else {
                 return Ok(Vec::new());
             };
-            let overs: Vec<(i64, String, String, Option<String>)> = {
+            let overs: Vec<(i64, String, String, Option<String>, String)> = {
                 let mut st = self
                     .conn
                     .prepare(
-                        "SELECT p.id, p.pool_key, p.unit, p.currency FROM pool_link l JOIN pool p ON p.id = l.overage_id
+                        "SELECT p.id, p.pool_key, p.unit, p.currency, p.role FROM pool_link l JOIN pool p ON p.id = l.overage_id
                           WHERE l.included_id = ?1 ORDER BY p.id",
                     )
                     .map_err(sql)?;
                 let rows = st
-                    .query_map([inc], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                    .query_map([inc], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
                     .map_err(sql)?;
                 rows.collect::<Result<_, _>>().map_err(sql)?
             };
+            // Where an overage pool serves this allowance, a balance beside
+            // it is the account that overage is paid from, not more spend:
+            // Cursor's unified plan states one expenditure twice, as the
+            // usage limit's monthly spend and as the prepaid balance's fall,
+            // and summing both doubled it. Each keeps its own history; only
+            // the overage is counted against the allowance.
+            let has_overage = overs.iter().any(|o| crate::history::fold::Role::from_name(&o.4) == crate::history::fold::Role::Overage);
             let mut out = Vec::new();
-            for (id, key, unit, currency) in overs {
+            for (id, key, unit, currency, role) in overs {
+                if has_overage && crate::history::fold::Role::from_name(&role) == crate::history::fold::Role::Balance {
+                    continue;
+                }
                 for span in self.spans_between(id, start, end)? {
                     if !span.exhausted.contains(&inc) {
                         continue;
@@ -1389,6 +1399,62 @@ mod tests {
         assert_eq!(own[0].cycle.start_source, StartSource::Inferred);
         assert_eq!(h.count("overage_span"), 1);
         assert_eq!(h.count("pool_link"), 1);
+    }
+
+    #[test]
+    fn a_balance_an_overage_is_paid_from_is_not_counted_again() {
+        // Codex's case: on Cursor's unified plan $5 of overage moves the
+        // usage limit's spend 0 -> 5 and the prepaid balance 20 -> 15. Both
+        // were linked to the exhausted pool and summed: $10.
+        let p = temp("prepaid-twice");
+        let mut h = History::open(&p).unwrap();
+        let a = 1_000_000.0;
+        let usd = || Unit::Money { currency: "USD".into(), exponent: 2 };
+        let limit = |used: f64, at: f64| Lane {
+            label: "usage limit".into(),
+            pct: 100.0 * used / 50.0,
+            pool_key: "usage_limit".into(),
+            unit: usd(),
+            role: PoolRole::Overage,
+            used: Some(used),
+            limit: Some(50.0),
+            reset: Some(a + MONTH),
+            window_secs: Some(MONTH),
+            fetched_at: at,
+            apart: true,
+            ..Lane::default()
+        };
+        let prepaid = |used: f64, at: f64| Lane {
+            label: "prepaid credits".into(),
+            pct: 100.0 * used / 20.0,
+            pool_key: "prepaid".into(),
+            unit: usd(),
+            role: PoolRole::Balance,
+            used: Some(used),
+            limit: Some(20.0),
+            fetched_at: at,
+            ..Lane::default()
+        };
+        let cursor = |lanes: Vec<Lane>| Observation {
+            provider: "cursor".into(),
+            account_id: "acct-prepaid".into(),
+            heading: "CURSOR".into(),
+            tab: "cursor".into(),
+            lanes,
+            ..Observation::default()
+        };
+        let reset = a + 3.0 * DAY;
+        let b = a + H;
+        h.record(&[cursor(vec![weekly(100.0, a, reset), limit(0.0, a), prepaid(0.0, a)])], &t(), a).unwrap();
+        h.record(&[cursor(vec![weekly(100.0, b, reset), limit(5.0, b), prepaid(5.0, b)])], &t(), b).unwrap();
+        let key = cursor(vec![]).account_key();
+        let got = h.spend_overlapping("cursor", &key, "seven_day", a, b).unwrap();
+        let total: f64 = got.iter().map(|s| s.span.amount).sum();
+        assert!((total - 5.0).abs() < 1e-9, "{got:#?}");
+        assert_eq!(got[0].overage_pool_key, "usage_limit");
+        // The balance's own history still holds its fall.
+        let months = h.balance_months("cursor", &key, "prepaid").unwrap();
+        assert!((months.iter().map(|m| m.spent).sum::<f64>() - 5.0).abs() < 1e-9);
     }
 
     #[test]
