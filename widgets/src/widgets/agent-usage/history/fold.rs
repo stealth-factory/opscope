@@ -1050,11 +1050,14 @@ fn after_end(
             let tol = tolerance(Some(w));
             let n = ((ns - end) / w).round();
             let aligned = n >= 0.0 && (ns - (end + n * w)).abs() <= tol;
+            // Windows passed unseen are windows of this length: a reading of
+            // another length an hour short of a weekly boundary is not on it.
+            let same = s.window_secs.is_some_and(|sw| (sw - w).abs() <= tol);
             // Aligned within the tolerance is one boundary: the new cycle
             // starts where the one before it (or the last hollow one) ended,
             // not a minute either side of it, or two adjacent cycles would
             // overlap - or leave a sliver - by the server's rounding.
-            if aligned && n >= 1.0 && model_before == CycleModel::Contiguous {
+            if aligned && same && n >= 1.0 && model_before == CycleModel::Contiguous {
                 // Whole windows passed unseen on a contiguous pool.
                 for k in 0..n as u32 {
                     out.push(hollow(*ordinal, end + k as f64 * w, w, plan.clone()));
@@ -1067,7 +1070,9 @@ fn after_end(
             } else if ns > end + tol {
                 (ns, CycleModel::UseAnchored, StartSource::Server)
             } else {
-                (ns, CycleModel::Contiguous, StartSource::Server)
+                // A window of another length begun before the closed cycle
+                // ended: the closed one holds until its end.
+                (ns.max(end), CycleModel::Contiguous, StartSource::Server)
             }
         }
         (Some(ns), None) => (ns, CycleModel::Contiguous, StartSource::Server),
@@ -1352,6 +1357,32 @@ mod tests {
         let last = out.cycles.last().unwrap();
         let hollow = &out.cycles[out.cycles.len() - 2];
         assert_eq!(hollow.ends_at, Some(last.starts_at));
+    }
+
+    #[test]
+    fn a_window_change_at_rollover_neither_overlaps_nor_starts_after_its_first_reading() {
+        let a = 1_000_000.0;
+        // CodeRabbit's case: a five-hour cycle ends at E, and the reading
+        // after it states a 24-hour window begun 600 s before E. The new
+        // cycle opened at E - 600 s, overlapping the closed one.
+        let e = a + W5;
+        let day = 24.0 * H;
+        let samples = vec![s(a + H, 40.0, Some(e), Some(W5)), s(e + 60.0, 5.0, Some(e - 600.0 + day), Some(day))];
+        let out = run(&samples);
+        assert_eq!(out.cycles.len(), 2, "{:#?}", out.cycles);
+        assert_eq!(out.cycles[0].closed_at, Some(e));
+        assert_eq!(out.cycles[1].starts_at, e, "never before the closed cycle's end");
+        // And a weekly cycle followed, nearly a week on, by a five-hour
+        // window begun an hour before E + 7d: a week's tolerance took that
+        // for the next weekly boundary, wrote a hollow week through E + 7d
+        // and opened the cycle 59 minutes after its first reading.
+        let e = a + WEEK;
+        let at = e + WEEK - 59.0 * 60.0;
+        let samples = vec![s(a + H, 40.0, Some(e), Some(WEEK)), s(at, 5.0, Some(e + WEEK - H + W5), Some(W5))];
+        let out = run(&samples);
+        let last = out.cycles.last().unwrap();
+        assert!(last.starts_at <= at, "{:#?}", out.cycles);
+        assert!(!out.cycles.iter().any(|c| c.is_hollow()), "{:#?}", out.cycles);
     }
 
     #[test]
