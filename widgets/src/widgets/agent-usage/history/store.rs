@@ -553,7 +553,23 @@ impl History {
     }
 
     /// Write one pass and fold what it changed, in one transaction.
+    ///
+    /// The held-back readings are part of what the transaction changes: a
+    /// pass that writes a bridge forgets the readings it came from. So a
+    /// pass that fails puts them back as they were, or the rolled-back
+    /// file would come back without its bridge and the pane without the
+    /// readings to write it again, and the fall it showed was watched would
+    /// read as an offline reset.
     pub fn record(&mut self, obs: &[Observation], t: &Thresholds, now: f64) -> Result<(), String> {
+        let held = self.seen.clone();
+        let out = self.record_pass(obs, t, now);
+        if out.is_err() {
+            self.seen = held;
+        }
+        out
+    }
+
+    fn record_pass(&mut self, obs: &[Observation], t: &Thresholds, now: f64) -> Result<(), String> {
         let seen = &mut self.seen;
         let tx = self
             .conn
@@ -3056,6 +3072,39 @@ mod tests {
         g.record(&[obs(vec![lane("secondary_window", 60.0, a + 1800.0, end, WEEK)])], &t, a + 1800.0)
             .unwrap();
         assert_eq!(g.count("reset_event"), 1);
+    }
+
+    #[test]
+    fn a_failed_pass_keeps_the_readings_its_bridge_was_made_from() {
+        // CodeRabbit's case: the pass that writes a bridge also forgets the
+        // readings held back for it. When that pass fails, the file rolls
+        // back but the memory did not, so the retry had nothing to bridge
+        // with and the watched fall read as an offline reset.
+        let p = temp("seen-rollback");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let end = a + 3.0 * 86_400.0;
+        let mut at = a;
+        while at < a + 1800.0 {
+            h.record(&[obs(vec![lane("secondary_window", 80.0, at, end, WEEK)])], &t, at).unwrap();
+            at += 30.0;
+        }
+        // The change itself is refused, after the bridge before it was made.
+        h.conn
+            .execute_batch(&format!(
+                "CREATE TEMP TRIGGER refuse BEFORE INSERT ON sample WHEN NEW.at = {at}
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;"
+            ))
+            .unwrap();
+        let change = || obs(vec![lane("secondary_window", 60.0, a + 1800.0, end, WEEK)]);
+        assert!(h.record(&[change()], &t, at).is_err());
+        h.conn.execute_batch("DROP TRIGGER refuse;").unwrap();
+        h.record(&[change()], &t, at).unwrap();
+        assert_eq!(h.count("reset_event"), 0, "the retried pass lost its watch evidence");
+        let s = h.samples("codex", &obs(vec![]).account_key(), "secondary_window").unwrap();
+        let ats: Vec<f64> = s.iter().map(|x| x.at - a).collect();
+        assert_eq!(ats, vec![0.0, 1500.0, 1800.0]);
     }
 
     #[test]
