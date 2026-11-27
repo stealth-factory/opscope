@@ -426,6 +426,11 @@ fn verdict(x: &Pair, input: &DetectInput, banks: &[BankEvent], dated: bool) -> V
                     "instant",
                 )
             }
+            // A date on one side only, or two that differ with no window to
+            // place a restart by: there are dates, and they do not say what
+            // happened, so the setting - which is for resets with none - is
+            // not reached for. The help promises exactly this.
+            (Some(_), _, _) | (_, Some(_), _) => (CycleEffect::Unknown, "none"),
             _ => match input.effect_override.and_then(EffectOverride::from_name) {
                 Some(EffectOverride::KeptBoundary) => (CycleEffect::KeptBoundary, "config"),
                 // With no instant to start it at: the reading that showed it.
@@ -1254,6 +1259,29 @@ mod tests {
         let e = one(&i);
         assert_eq!(e.effect, CycleEffect::KeptBoundary);
         assert_eq!(evidence(&e)["effect"]["source"], "instant");
+    }
+
+    #[test]
+    fn a_reset_dated_on_one_side_only_never_takes_the_configured_effect() {
+        // CodeRabbit's case: 60% with a reset date, then 0% with none. The
+        // help says a date on either side keeps the setting out; the code
+        // reached for it whenever the pair could not place the effect.
+        let samples = vec![
+            s(A + H, 60.0, Some(A + WEEK), Some(WEEK)),
+            s(A + H + 10.0 * M, 0.0, None, None),
+        ];
+        let mut i = input(&samples, &[], &[]);
+        i.effect_override = Some("restarted");
+        let e = one(&i);
+        assert_eq!(e.effect, CycleEffect::Unknown);
+        assert_eq!(evidence(&e)["effect"]["source"], "none");
+        // Two dates that differ, with no window to start a restart from.
+        let samples = vec![s(A + H, 60.0, Some(A + WEEK), None), s(A + H + 10.0 * M, 0.0, Some(A + 2.0 * WEEK), None)];
+        let mut i = input(&samples, &[], &[]);
+        i.effect_override = Some("restarted");
+        for e in detect(&i) {
+            assert_ne!(evidence(&e)["effect"]["source"], "config", "{e:?}");
+        }
     }
 
     #[test]

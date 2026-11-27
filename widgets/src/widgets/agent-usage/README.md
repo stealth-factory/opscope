@@ -2066,7 +2066,7 @@ reset did where nothing the provider sent says:
 | `history_near_zero` | `1` | percentage points. While watching, a reset reads as a figure falling back to at most this |
 | `history_offline_fall` | `3` | percentage points. After an offline gap, a fall of at least this - or `history_offline_fall_pct` of the earlier figure, whichever is larger - counts |
 | `history_offline_fall_pct` | `5` | percent of the earlier figure, the other half of the offline fall |
-| `history_reset_effect` | `{}` | per agent, `kept_boundary` or `restarted`: the effect recorded for a reset with no reset date to read it from, e.g. `{"droid": "restarted"}`. Marked as configured, never as seen; a reset with dates ignores it |
+| `history_reset_effect` | `{}` | per agent, `kept_boundary` or `restarted`: the effect recorded for a reset with no reset date to read it from, e.g. `{"droid": "restarted"}`. Marked as configured, never as seen; a reset with a date on either side ignores it, and is unknown where its dates cannot say |
 
 ## The thing this widget does not do
 
