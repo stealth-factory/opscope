@@ -339,6 +339,13 @@ pub struct Cycle {
     pub limit_amount: Option<f64>,
     /// First reading at or above [`EXHAUSTED_PCT`].
     pub exhausted_at: Option<f64>,
+    /// The first and last readings this cycle holds. The first can come
+    /// before `starts_at`, by at most the tolerance: a reading just short
+    /// of the old end that already states the next window's reset is that
+    /// window's ([`rolled_over`]'s `early`), and it is a real reading, so it
+    /// is not moved. Nothing is lost by it: a reset is matched to the cycle
+    /// that holds its earlier reading, by that reading's own time, and no
+    /// reading of the old cycle falls between this one and `starts_at`.
     pub first_obs_at: Option<f64>,
     pub last_obs_at: Option<f64>,
     /// 0..1: how much of the cycle was watched (§5.8). For an open cycle,
