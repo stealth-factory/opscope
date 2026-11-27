@@ -779,6 +779,59 @@ fn credits_lane(d: &Data) -> Option<Lane> {
     })
 }
 
+/// Lanes the history records that the summary draws no bar for: extra
+/// usage with no ceiling - unlimited, or switched off with spend still on
+/// it - in dollars, with no limit and no percentage, under the same pool as
+/// a capped month. Without it an uncapped account kept no overage history,
+/// its per-request charges had no pool to land in, and removing a cap
+/// stopped a month's history mid-way. A team pool's spend is not this
+/// account's and stays out, as it does from the summary's lane.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let Some(live) = d.live.as_ref() else {
+        return Vec::new();
+    };
+    let on_unified = unified(d);
+    let (state, from_prepaid) = if on_unified {
+        additional_state_from(d, live)
+    } else {
+        (extra_state(live, d.hard.as_ref()), false)
+    };
+    let used = match state {
+        ExtraState::Unlimited { used } | ExtraState::Disabled { used } => used,
+        _ => return Vec::new(),
+    };
+    let (label, key, window_secs, reset) = if on_unified {
+        let (start, end) = month_of(d);
+        let secs = match (start, end) {
+            (Some(s), Some(e)) if e > s => Some((e - s) / 1000.0),
+            _ => None,
+        };
+        (LIMIT_LABEL, "usage_limit", secs, end.map(|e| e / 1000.0))
+    } else {
+        let (secs, reset) = cycle_of(live);
+        ("extra", "extra", secs, reset)
+    };
+    let fetched_at = if from_prepaid && d.prepaid_at > 0.0 { d.prepaid_at } else { d.fetched_at };
+    vec![Lane {
+        label: label.into(),
+        pct: f64::NAN,
+        window_secs,
+        reset,
+        // Kept through a failure only when the figure is the usage call's;
+        // the prepaid response that carries it on the unified plan is asked
+        // on its own.
+        stale: d.live_kept.is_some() && !from_prepaid,
+        projected: false,
+        apart: true,
+        pool_key: key.into(),
+        unit: usd(),
+        role: PoolRole::Overage,
+        used: Some(used / 100.0),
+        limit: None,
+        fetched_at,
+    }]
+}
+
 /// Cursor's money is US dollars, sent in cents.
 fn usd() -> Unit {
     Unit::Money { currency: "USD".into(), exponent: 2 }
@@ -4333,6 +4386,33 @@ mod tests {
         assert!(squeeze(&text).contains("usage limit no limit set"), "{text}");
         assert!(squeeze(&text).contains("$3.50 this month"), "{text}");
         assert!(!has_bar(&text, "usage limit"), "a bar of no limit: {text}");
+    }
+
+    #[test]
+    fn uncapped_extra_usage_is_kept_in_the_history_with_no_bar() {
+        // Codex's case: unlimited or switched-off extra usage has no
+        // percentage, so the gate that keeps it off the summary also kept
+        // it out of the history, and its charges had no pool to land in.
+        let mut d = unified_data(false);
+        d.fetched_at = 1_000.0;
+        d.prepaid_at = 1_100.0;
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        assert!(!lanes(&d).iter().any(|l| l.pool_key == "usage_limit"), "the summary draws no bar");
+        let got = history_lanes(&d);
+        assert_eq!(got.len(), 1);
+        let l = &got[0];
+        assert_eq!((l.pool_key.as_str(), l.role), ("usage_limit", PoolRole::Overage));
+        assert_eq!((l.used, l.limit, l.fetched_at), (Some(3.5), None, 1_100.0));
+        assert!(l.pct.is_nan() && l.reset.is_some());
+        // An account's own plan, uncapped: the billing cycle's `extra` pool.
+        let mut v = measured();
+        v["spendLimitUsage"] = serde_json::json!({"totalSpend": 964, "individualUsed": 964, "limitType": "user"});
+        let own = Data { live: Some(v), hard: Some(serde_json::json!({})), fetched_at: 2_000.0, ..Data::default() };
+        let got = history_lanes(&own);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].pool_key.as_str(), got[0].used), ("extra", Some(9.64)));
+        // A capped month is the summary's lane already, and is not doubled.
+        assert!(history_lanes(&unified_data(true)).is_empty());
     }
 
     #[test]

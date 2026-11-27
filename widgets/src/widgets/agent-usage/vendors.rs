@@ -526,6 +526,8 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         }
         let mut lanes = lanes_of(name, s);
         let facts = if name == "cursor" {
+            // Spend with no cap, which the summary draws no bar for.
+            lanes.extend(crate::cursor::history_lanes(&s.cursor));
             crate::cursor::history_facts(&s.cursor)
         } else {
             // A figure the log recorded is a cached one, whatever its age.
