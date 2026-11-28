@@ -1352,6 +1352,8 @@ fn upsert_account(tx: &Transaction, provider: &str, key: &str, heading: &str, no
 /// the samples alone understate by up to the heartbeat. `last_pct` moves
 /// with it, and `last_pct_at` records which `last_seen` it came with, so
 /// an older build moving `last_seen` alone is seen to have (schema v2).
+/// A pool made by a cached reading gets neither: that reading is no live
+/// answer, and stamped as one it outranked a live answer read before it.
 fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i64, String> {
     let (currency, exponent) = match &lane.unit {
         crate::shared::Unit::Money { currency, exponent } => (Some(currency.clone()), Some(*exponent)),
@@ -1360,7 +1362,7 @@ fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i
     tx.query_row(
         "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen, last_pct,
                           last_pct_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?10, ?8)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, CASE WHEN ?9 THEN ?10 END, CASE WHEN ?9 THEN ?8 END)
          ON CONFLICT(account_id, pool_key) DO UPDATE SET label = excluded.label, role = excluded.role,
              unit = excluded.unit, currency = excluded.currency, exponent = excluded.exponent,
              first_seen = MIN(first_seen, excluded.first_seen),
@@ -3161,6 +3163,38 @@ mod tests {
         }
         let c = g.cycles("codex", &key, "primary_window").unwrap();
         assert_eq!(c.last().unwrap().end_reason, Some(EndReason::PoolGone), "{c:#?}");
+    }
+
+    #[test]
+    fn a_cached_reading_that_makes_a_pool_is_not_its_last_live_percentage() {
+        // Review on OPS-309: a pool first written from a cached reading
+        // took that reading's percentage as the last live answer's. A live
+        // answer read earlier, written after, could not move it, so a pool
+        // last read live at 0% was judged on the cached 40% and closed as
+        // gone instead of idle.
+        let mut h = History::open(&temp("pool-gone-cached-first")).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        let mut cached = two_pools(a + 600.0, Some((40.0, end)), 10.0, false);
+        cached.lanes[0].stale = true;
+        h.record(&[cached], &t, a + 600.0).unwrap();
+        let (pct, pct_at): (Option<f64>, Option<f64>) = h
+            .conn
+            .query_row("SELECT last_pct, last_pct_at FROM pool WHERE pool_key = 'primary_window'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((pct, pct_at), (None, None), "a cached reading stamped as live");
+        h.record(&[two_pools(a, Some((0.0, end)), 10.0, false)], &t, a + 700.0).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let key = obs(vec![]).account_key();
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert!(c.iter().all(|c| c.end_reason != Some(EndReason::PoolGone)), "{c:#?}");
     }
 
     #[test]
