@@ -110,6 +110,9 @@ struct Quota {
     /// The answer carries a marker only the unified Cursor and Grok plan
     /// sends. See `unified_markers`.
     unified: bool,
+    /// The figure, or the percentage a billing answer lacked, came from the
+    /// client log, whose lines name no account. `taken` is then that line's.
+    logged: bool,
 }
 
 /// What the transcripts on this machine recorded, plus the account-wide
@@ -144,6 +147,10 @@ pub struct Data {
     /// resolving it again when the history is written could pair this
     /// quota with an account signed in since.
     account_id: String,
+    /// When `auth.json` last changed, as epoch seconds; zero when there is
+    /// none. Every sign-in rewrites it, so a log line older than this may
+    /// be another account's.
+    auth_at: f64,
     /// Where this account stands relative to the unified plan, once both
     /// vendors have been read. Set by `vendors::link_spacexsi`.
     pub spacexsi: Spacexsi,
@@ -293,6 +300,7 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
             on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
             prepaid: prepaid_of(cfg),
             unified: unified_markers(cfg),
+            logged: true,
         };
         let better = match &best {
             None => true,
@@ -396,6 +404,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config, raw: Option<&str>) -> (Option<Qu
                             q.pct = l.pct;
                             q.billed_at = q.taken;
                             q.taken = l.taken;
+                            q.logged = true;
                         }
                         // No reason recorded here on purpose. The row that
                         // stands where the bar would be already says there
@@ -634,6 +643,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg, raw.as_deref());
         return Data {
             account_id: account_of(raw.as_deref()),
+            auth_at: auth_changed_at(),
             quota,
             quota_live,
             quota_at,
@@ -718,6 +728,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let quota_read = quota_now(caches, cfg, raw.as_deref());
     Data {
         account_id,
+        auth_at: auth_changed_at(),
         ok: true,
         history,
         sessions,
@@ -759,6 +770,19 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
 /// by a name that is different on every machine.
 fn token_entry() -> Result<serde_json::Value, String> {
     token_entry_in(read_auth().as_deref())
+}
+
+/// When `auth.json` last changed, as epoch seconds; zero without one.
+///
+/// Read after the body, so a sign-in that lands between the two dates
+/// the change later than the body it came with, never earlier: a line is
+/// only ever kept back from the history for it, not let through.
+fn auth_changed_at() -> f64 {
+    std::fs::metadata(under_home(AUTH))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0.0, |d| d.as_secs_f64())
 }
 
 /// `auth.json` as it is now. Read once for a pass's account and token, so
@@ -1190,6 +1214,7 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         on_demand_cap: val_of(&cfg["onDemandCap"]["val"]),
         prepaid: prepaid_of(cfg),
         unified: unified_markers(cfg),
+        logged: false,
     })
 }
 
@@ -1303,9 +1328,51 @@ pub fn quota_is_live(d: &Data) -> bool {
     d.quota_live
 }
 
+/// Whether a log line taken at `taken` may predate the sign-in now on
+/// disk, whose `auth.json` last changed at `auth_at`.
+///
+/// The client log names no account: nothing on a billing line, and the
+/// user id it logs at start-up is not on every process's lines, nor logged
+/// again after a sign-in inside a running one. Every sign-in rewrites
+/// `auth.json`, so a line written before its last change may be the
+/// previous account's. So does a token refresh, which makes this keep back
+/// more than it must; it never lets through a line that could be another
+/// account's. An undated line is not known to be after. With no `auth.json`
+/// there is no account to file under, and nothing to compare.
+fn may_predate_sign_in(taken: Option<f64>, auth_at: f64) -> bool {
+    auth_at > 0.0 && taken.is_none_or(|t| t < auth_at)
+}
+
+/// The reading as the history may file it under this pass's account
+/// (OPS-309): as on screen, unless part of it came from a log line that
+/// may predate the sign-in. Then a billing answer keeps its own figures
+/// without the percentage it borrowed from the log, and a reading that is
+/// the log's alone is not filed at all. The tab still shows it.
+fn for_history(d: &Data) -> Option<std::borrow::Cow<'_, Data>> {
+    use std::borrow::Cow;
+    let Some(q) = d.quota.as_ref().filter(|q| q.logged && may_predate_sign_in(q.taken, d.auth_at)) else {
+        return Some(Cow::Borrowed(d));
+    };
+    if !d.quota_live {
+        return None;
+    }
+    let mut own = d.clone();
+    own.quota = Some(Quota { pct: None, taken: q.billed_at, billed_at: None, logged: false, ..q.clone() });
+    Some(Cow::Owned(own))
+}
+
+/// The lanes the history files for Grok: [`lanes`], less what
+/// [`for_history`] keeps back.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    for_history(d).map(|d| lanes(&d)).unwrap_or_default()
+}
+
 /// What the history needs from Grok beyond its lanes: the account the token
 /// names, the tier, and why the figure is not the server's.
 pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let Some(d) = for_history(d) else {
+        return crate::history::Facts { account_id: d.account_id.clone(), plan: None, bank: None, why: d.quota_why.clone() };
+    };
     let plan = d
         .quota
         .as_ref()
@@ -2102,6 +2169,43 @@ mod tests {
     }
 
     #[test]
+    fn a_log_figure_from_before_the_sign_in_is_never_filed_under_it() {
+        // OPS-309 item 7: the log names no account. A line written before
+        // auth.json last changed may be the previous sign-in's, so the
+        // history files it under nobody; the tab still shows it.
+        let logged = newest_quota([LOG_LINE].into_iter()).expect("a reading");
+        let at = |taken: f64, auth_at: f64| Data {
+            quota: Some(Quota { taken: Some(taken), ..logged.clone() }),
+            account_id: "new-account".into(),
+            auth_at,
+            ..Data::default()
+        };
+        let before = at(1_000.0, 2_000.0);
+        assert!(!lanes(&before).is_empty(), "the tab keeps the log fallback");
+        assert!(history_lanes(&before).is_empty(), "the old sign-in's figure filed under the new one");
+        assert!(history_facts(&before).plan.is_none(), "the old sign-in's tier filed under the new one");
+        assert_eq!(history_facts(&before).account_id, "new-account");
+        // Written after the sign-in: this account's, and filed as before.
+        let after = at(3_000.0, 2_000.0);
+        assert_eq!(history_lanes(&after).len(), lanes(&after).len());
+        assert!(history_facts(&after).plan.is_some());
+        // An undated line is not known to be after; no auth.json, nothing
+        // to compare against and no account to file under.
+        let undated = Data { quota: Some(Quota { taken: None, ..logged.clone() }), auth_at: 2_000.0, ..Data::default() };
+        assert!(history_lanes(&undated).is_empty());
+        assert_eq!(history_lanes(&at(1_000.0, 0.0)).len(), lanes(&at(1_000.0, 0.0)).len());
+        // A billing answer that borrowed the log's percentage keeps its own
+        // figures and drops the borrowed one, dated by the answer.
+        let mut merged = at(1_000.0, 2_000.0);
+        merged.quota_live = true;
+        merged.quota.as_mut().unwrap().billed_at = Some(3_000.0);
+        let got = history_lanes(&merged);
+        assert!(!got.iter().any(|l| l.pool_key == "credits"), "{:?}", got.iter().map(|l| &l.pool_key).collect::<Vec<_>>());
+        assert!(!got.is_empty() && got.iter().all(|l| l.fetched_at == 3_000.0));
+        assert!(lanes(&merged).iter().any(|l| l.pool_key == "credits"), "the tab keeps the borrowed percentage");
+    }
+
+    #[test]
     fn a_reading_is_judged_by_its_age_not_by_where_it_came_from() {
         // This asserted the opposite until the rule changed: that a reading
         // is current "by definition" when it came from the server. That is
@@ -2196,6 +2300,7 @@ mod tests {
             on_demand_cap: None,
             prepaid: None,
             unified: false,
+            logged: true,
         };
         let p = palette();
         let old = grok_tab(
@@ -2708,6 +2813,7 @@ mod tests {
             quota_every: 0.0,
             quota_why: String::new(),
             account_id: String::new(),
+            auth_at: 0.0,
             spacexsi: Spacexsi::No,
         };
         for w in [40usize, 80, 200] {

@@ -795,6 +795,12 @@ fn credits_lane(d: &Data) -> Option<Lane> {
 /// its per-request charges had no pool to land in, and removing a cap
 /// stopped a month's history mid-way. A team pool's spend is not this
 /// account's and stays out, as it does from the summary's lane.
+///
+/// Nothing before the usage call has answered once, even when the prepaid
+/// call has stated this month's spend (OPS-309): only the usage answer says
+/// whether the month is capped, and the history stores an unknown cap and
+/// no cap alike, as a reading with no limit. Filed without it, the spend of
+/// a capped month would read as the cap removed.
 pub fn history_lanes(d: &Data) -> Vec<Lane> {
     let Some(live) = d.live.as_ref() else {
         return Vec::new();
@@ -4425,6 +4431,19 @@ mod tests {
         assert_eq!((got[0].pool_key.as_str(), got[0].used), ("extra", Some(9.64)));
         // A capped month is the summary's lane already, and is not doubled.
         assert!(history_lanes(&unified_data(true)).is_empty());
+    }
+
+    #[test]
+    fn prepaid_spend_before_the_first_usage_answer_is_not_filed_as_uncapped() {
+        // OPS-309 item 6: the prepaid call answered and the usage call has
+        // not yet. Whether the month is capped is unknown, and a reading
+        // with no limit is what an uncapped month writes, so nothing is.
+        let mut d = unified_data(true);
+        d.live = None;
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        d.prepaid_at = 1_100.0;
+        assert!(history_lanes(&d).is_empty());
+        assert!(!lanes(&d).iter().any(|l| l.pool_key == "usage_limit"));
     }
 
     #[test]
