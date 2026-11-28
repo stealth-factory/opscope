@@ -524,7 +524,8 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         if !present(name) {
             continue;
         }
-        let mut lanes = lanes_of(name, s);
+        // Grok's less a log figure that may be another sign-in's (OPS-309).
+        let mut lanes = if name == "grok" { crate::grok::history_lanes(&s.grok) } else { lanes_of(name, s) };
         let facts = if name == "cursor" {
             // Spend with no cap, which the summary draws no bar for.
             lanes.extend(crate::cursor::history_lanes(&s.cursor));

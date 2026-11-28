@@ -2059,6 +2059,14 @@ goes:
   the history stores an unknown limit the same way as no limit. So spend read
   before that first answer is not written, rather than written as a month
   whose cap was removed.
+- **A Grok figure from the CLI's log is written only if it is newer than
+  `~/.grok/auth.json`.** The log does not say which account a line belongs
+  to, and every sign-in rewrites that file, so an older line could be the
+  previous account's. A token refresh rewrites it too, so this sometimes
+  leaves out a line that was in fact this account's; it never files one
+  account's quota under another. The tab still shows the log's figure. A
+  billing answer that took its percentage from such a line is written
+  without the percentage.
 
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one
