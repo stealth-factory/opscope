@@ -2092,8 +2092,21 @@ goes:
   line. A stretch with no local turns says nothing rather than "no local
   turns": Claude Code deletes old transcripts, and a log that is gone reads
   exactly like an idle machine. The logs are read on a thread of their own,
-  only those written since the stretch began and only the part of each that
-  covers it, once per stretch.
+  only those written since the stretch began. A Claude transcript is read
+  only for the part that covers the stretch; a Codex rollout is read from
+  its first line, because whose its turns are is the latest session header
+  above them, which can sit anywhere in the file, so a long rollout costs
+  its whole length up to the end of the stretch. A config dir counts only
+  for stretches that began after it was signed in as the account, and one
+  whose sign-in was never dated counts in none before the next pass dates
+  it. What a stretch's read finds is kept while a tab shows it and for ten
+  minutes after, and is not read again while its log directories stay the
+  same; a directory the
+  read did not cover - another config dir signed in as the account - reads
+  it again. A stretch whose read did not finish says nothing: one cut short
+  because another stretch spent the reading budget, or because the listing
+  of its logs was, is read again on a later pass; one too large for the
+  whole budget, or whose log failed part-way, stays unsaid.
 
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one
