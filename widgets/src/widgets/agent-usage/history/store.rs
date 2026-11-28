@@ -840,11 +840,15 @@ impl History {
         let account = upsert_account(&tx, provider, account_key, heading, now)?;
         let mut refold: Vec<(i64, f64)> = Vec::new();
         for r in rows {
+            // A replayed row is a reading of the pool at its own time, so
+            // where it moves `last_seen` the percentage beside it is its
+            // own; a row with none leaves `last_pct` unstated, never 0.
             let lane = Lane {
                 label: r.label.clone(),
                 pool_key: r.pool_key.clone(),
                 unit: r.unit.clone(),
                 role: r.role,
+                pct: r.sample.pct.unwrap_or(f64::NAN),
                 ..Lane::default()
             };
             let pool = upsert_pool(&tx, account, &lane, r.sample.at)?;
@@ -4475,6 +4479,37 @@ mod tests {
         let alone: Vec<f64> = g.samples("codex", &key, "secondary_window").unwrap().iter().map(|x| x.at).collect();
         let model: Vec<f64> = backfill::thin(rows).iter().map(|r| r.sample.at).collect();
         assert_eq!(alone, model);
+    }
+
+    #[test]
+    fn a_replayed_reading_moves_last_seen_with_its_own_percentage_never_zero() {
+        // Review on OPS-309: a replayed row's lane was built from
+        // `Lane::default()`, so it moved `last_seen` with a `last_pct` of
+        // 0 nobody measured, and `gone_at` judged the pool idle on it.
+        let mut h = History::open(&temp("replay-last-pct")).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let key = obs(vec![]).account_key();
+        let rows = vec![replayed(a, 40.0, a + WEEK), replayed(a + 60.0, 40.0, a + WEEK)];
+        h.replay("codex", &key, "CODEX", &rows, &t, a + 100.0).unwrap();
+        assert_eq!(h.samples("codex", &key, "secondary_window").unwrap().len(), 1);
+        let (seen, pct): (f64, Option<f64>) = h
+            .conn
+            .query_row("SELECT last_seen, last_pct FROM pool WHERE pool_key = 'secondary_window'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        // The held-back row is a real reading at its own time.
+        assert_eq!((seen, pct), (a + 60.0, Some(40.0)));
+        // A row with no percentage states none.
+        let mut bare = replayed(a + 200.0, 0.0, a + WEEK);
+        bare.sample.pct = None;
+        h.replay("codex", &key, "CODEX", &[bare], &t, a + 300.0).unwrap();
+        let pct: Option<f64> = h
+            .conn
+            .query_row("SELECT last_pct FROM pool WHERE pool_key = 'secondary_window'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pct, None);
     }
 
     #[test]
