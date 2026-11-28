@@ -36,10 +36,10 @@
 //! names no account, so a dir signed in as someone else before holds their
 //! turns. When it changed is the first pass that saw the dir as this
 //! account ([`History::signed_in_since`]); where that was never recorded,
-//! the first time the account was seen. A bracket the change fell inside
-//! says nothing. Codex rollouts count only in sessions whose `session_meta`
-//! names the account, as the backfill does, so another account's turns
-//! never land in this one's bracket.
+//! the dir counts in no bracket before the next pass, which records it.
+//! A bracket the change fell inside says nothing. Codex rollouts count only
+//! in sessions whose `session_meta` names the account, as the backfill does,
+//! so another account's turns never land in this one's bracket.
 //!
 //! **Bounded reads.** A bracket is read once and cached under its agent,
 //! account and span, while a tab asks for it and for [`EVICT_AFTER`] past
@@ -930,6 +930,50 @@ mod tests {
             tick_until_read_of(&mut r, &h, &now_obs, now, after),
             Local::Found(Activity { agent: Agent::ClaudeCode, first: switched + 600.0, last: switched + 600.0, turns: 1 })
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_config_dir_with_no_recorded_sign_in_gives_no_older_bracket_its_turns() {
+        // Review on OPS-309: a file from before sign-ins were dated knows a
+        // dir is signed in as X, not since when, and the fallback took the
+        // first time X was seen at all - which another dir could have made
+        // while this one was Y's - and gave Y's turns to X's bracket.
+        let d = dir("reader-undated");
+        let mut h = History::open(&d.join(super::super::store::FILE)).unwrap();
+        let t = super::super::fold::Thresholds::default();
+        let (home, work) = (d.join("home"), d.join("work"));
+        for p in [&home, &work] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let claude = |profile: &str, logs: &std::path::Path| Observation {
+            provider: "claude".into(),
+            account_id: "x".into(),
+            profile: profile.into(),
+            tab: if profile.is_empty() { "claude".into() } else { format!("claude:{profile}") },
+            local_logs: vec![logs.to_string_lossy().into()],
+            ..Observation::default()
+        };
+        // `work` has been X's since long before the bracket. `home` is X's
+        // now, with no record of when it became so.
+        let obs = vec![claude("", &home), claude("work", &work)];
+        h.record(&obs, &t, T - 5000.0).unwrap();
+        h.conn.execute("DELETE FROM meta WHERE k = 'account_since:claude:default'", []).unwrap();
+        std::fs::write(home.join("s.jsonl"), [claude_line("ys-1", T + 60.0), claude_line("ys-2", T + 120.0)].join("\n")).unwrap();
+        std::fs::write(work.join("s.jsonl"), claude_line("mine", T + 90.0)).unwrap();
+        let x = h.account_key_of(&obs[0]).unwrap();
+        assert_eq!(h.signed_in_since(&obs[0], &x), None);
+        assert!(h.signed_in_since(&obs[1], &x).is_some());
+        let now = opscope_core::now();
+        let mut r = Reader::default();
+        assert_eq!(
+            tick_until_read(&mut r, &h, &obs, now),
+            Local::Found(Activity { agent: Agent::ClaudeCode, first: T + 90.0, last: T + 90.0, turns: 1 })
+        );
+        // The next pass dates it from then: older brackets still leave it out.
+        let next = T + 3.0 * LONG;
+        h.record(&obs, &t, next).unwrap();
+        assert_eq!(h.signed_in_since(&obs[0], &x), Some(next));
         let _ = std::fs::remove_dir_all(&d);
     }
 

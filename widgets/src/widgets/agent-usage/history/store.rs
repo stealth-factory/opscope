@@ -577,19 +577,22 @@ impl History {
 
     /// Since when `o`'s profile - one config dir - has been signed in as
     /// `account_key`, as far as this history knows: the first pass that saw
-    /// it so ([`account_since`]); where that was never recorded, the first
-    /// time the account was seen at all, which is no later. `None` when the
-    /// profile was last seen as another account, or the account is not
-    /// stored: nothing of the profile's is the account's then.
+    /// it so ([`account_since`]). A profile with no account id of its own
+    /// is filed under itself, so it has been since the account was first
+    /// seen. `None` when the profile was last seen as another account, the
+    /// account is not stored, or when it changed was never recorded (a file
+    /// from before it was kept): nothing of the profile's is known to be
+    /// the account's then. The account's own first sighting is no answer,
+    /// since another profile may have made it while this one was someone
+    /// else's (review on OPS-309); the next pass records one instead.
     pub fn signed_in_since(&self, o: &Observation, account_key: &str) -> Option<f64> {
-        let last = meta_read(&self.conn, &last_account(o)).ok()?;
-        if last.as_deref().is_some_and(|l| l != account_key) {
-            return None;
-        }
-        if last.is_some() {
-            if let Some(at) = meta_read(&self.conn, &account_since(o)).ok()?.and_then(|v| v.parse::<f64>().ok()) {
-                return Some(at);
+        match meta_read(&self.conn, &last_account(o)).ok()? {
+            Some(last) if last != account_key => return None,
+            Some(_) => {
+                return meta_read(&self.conn, &account_since(o)).ok()?.and_then(|v| v.parse::<f64>().ok());
             }
+            None if o.has_stable_id() => return None,
+            None => {}
         }
         self.conn
             .query_row(
@@ -660,6 +663,10 @@ impl History {
                     meta_set(&tx, &last_account(o), &key)?;
                     // When this profile was first seen signed in as it, so
                     // its local logs are not given to it from before.
+                    meta_set(&tx, &account_since(o), &now.to_string())?;
+                } else if meta_get(&tx, &account_since(o))?.is_none() {
+                    // Signed in as it since before the file kept when: from
+                    // here on is all that is known.
                     meta_set(&tx, &account_since(o), &now.to_string())?;
                 }
                 // Beside it, whose the credential was on the same pass: what
