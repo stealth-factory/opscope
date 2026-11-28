@@ -643,7 +643,7 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg, raw.as_deref());
         return Data {
             account_id: account_of(raw.as_deref()),
-            auth_at: auth_changed_at(),
+            auth_at: sign_in_at(&account_of(raw.as_deref())),
             quota,
             quota_live,
             quota_at,
@@ -726,9 +726,10 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     let raw = read_auth();
     let account_id = account_of(raw.as_deref());
     let quota_read = quota_now(caches, cfg, raw.as_deref());
+    let auth_at = sign_in_at(&account_id);
     Data {
         account_id,
-        auth_at: auth_changed_at(),
+        auth_at,
         ok: true,
         history,
         sessions,
@@ -777,6 +778,22 @@ fn token_entry() -> Result<serde_json::Value, String> {
 /// Read after the body, so a sign-in that lands between the two dates
 /// the change later than the body it came with, never earlier: a line is
 /// only ever kept back from the history for it, not let through.
+/// The `auth_at` a pass that captured `account` stores, read after its
+/// quota: [`signed_in_after`] of the account on disk by then.
+fn sign_in_at(account: &str) -> f64 {
+    signed_in_after(account, &account_of(read_auth().as_deref()), auth_changed_at())
+}
+
+/// When the sign-in a pass's log lines must postdate began. The log is
+/// read after the account is taken from `auth.json`, so a sign-in as
+/// someone else in between, whose own line then landed after `changed_at`,
+/// would pass for the first account's (review on OPS-309). When the account
+/// on disk is no longer the one the pass captured, no line it read is known
+/// to be that account's: every one is held back from its history.
+fn signed_in_after(captured: &str, on_disk: &str, changed_at: f64) -> f64 {
+    if captured == on_disk { changed_at } else { f64::INFINITY }
+}
+
 fn auth_changed_at() -> f64 {
     std::fs::metadata(under_home(AUTH))
         .and_then(|m| m.modified())
@@ -2203,6 +2220,16 @@ mod tests {
         assert!(!got.iter().any(|l| l.pool_key == "credits"), "{:?}", got.iter().map(|l| &l.pool_key).collect::<Vec<_>>());
         assert!(!got.is_empty() && got.iter().all(|l| l.fetched_at == 3_000.0));
         assert!(lanes(&merged).iter().any(|l| l.pool_key == "credits"), "the tab keeps the borrowed percentage");
+        // Review on OPS-309: signed in as someone else while the log was
+        // being read, whose line landed after that sign-in. Against the
+        // newer auth.json it passed, and went under the account the pass
+        // began with. The account is checked again once the log is read.
+        let raced = at(3_000.0, signed_in_after("new-account", "someone-else", 2_500.0));
+        assert!(!lanes(&raced).is_empty(), "the tab keeps the log fallback");
+        assert!(history_lanes(&raced).is_empty(), "a line of the account signed in mid-pass filed under the first");
+        assert!(history_facts(&raced).plan.is_none());
+        assert_eq!(signed_in_after("new-account", "new-account", 2_500.0), 2_500.0);
+        assert_eq!(history_lanes(&at(3_000.0, signed_in_after("a", "a", 2_000.0))).len(), lanes(&after).len());
     }
 
     #[test]
