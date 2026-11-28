@@ -2053,6 +2053,12 @@ goes:
   chart. Cursor's
   prepaid credit, Codex, Devin and Droid state no grant expiries, so their
   falls are all spend.
+- **Cursor's additional usage on the unified plan is recorded from the
+  usage call's first answer.** The prepaid call can state the month's spend
+  sooner, but only the usage answer says whether the month has a limit, and
+  the history stores an unknown limit the same way as no limit. So spend read
+  before that first answer is not written, rather than written as a month
+  whose cap was removed.
 
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one
