@@ -143,6 +143,10 @@ pub struct PoolHistory {
     /// When the first of them started, or the first reading.
     pub since: Option<f64>,
     pub body: Body,
+    /// An overage or balance pool's newest long spend brackets, with what
+    /// this machine's agent logs say about each (§6.3, source 3). Empty for
+    /// a provider with no local agent.
+    pub brackets: Vec<super::local::Bracket>,
 }
 
 /// One tab's history.
@@ -260,7 +264,11 @@ impl History {
             total: 0,
             since: None,
             body: Body::Cycles(Vec::new()),
+            brackets: Vec::new(),
         };
+        if role != Role::Included && super::local::Agent::of(provider).is_some() {
+            out.brackets = self.long_brackets(provider, account_key, &row.key)?;
+        }
         match role {
             Role::Balance => {
                 // A pool read only ever empty (Perplexity records an empty

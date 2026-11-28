@@ -44,6 +44,7 @@ pub mod draw;
 // The fold's types carry what phase 2 (resets) and phase 3 (charts) read.
 #[allow(dead_code)]
 pub mod fold;
+pub mod local;
 pub mod overage;
 pub mod resets;
 // Read helpers (`cycles`, `samples`) are phase 3's, for the charts.
@@ -184,6 +185,10 @@ pub struct Observation {
     /// Per-request charges the provider published with this pass's
     /// readings (Cursor's usage events, §6.3), for `overage_event`.
     pub charges: Vec<overage::Charge>,
+    /// This machine's agent logs for the account (§6.3, source 3): the
+    /// Claude config dir's `projects`, Codex's rollout roots. Empty for a
+    /// provider with no local agent.
+    pub local_logs: Vec<String>,
 }
 
 impl Observation {
@@ -322,6 +327,9 @@ pub struct Recorder {
     failed: Option<String>,
     /// The one-off Codex backfill, read on a thread of its own (§8).
     backfill: backfill::Runner,
+    /// The local agent turns inside long spend brackets, read on a thread
+    /// of their own (§6.3, source 3).
+    local: local::Reader,
     /// Why the history stopped: a panic inside a pass. Kept and said.
     stopped: Option<String>,
     /// Makes the next pass panic, for the test that it is caught.
@@ -343,6 +351,7 @@ impl Recorder {
             note: None,
             failed: None,
             backfill: backfill::Runner::new(roots),
+            local: local::Reader::default(),
             stopped: None,
             #[cfg(test)]
             panic_next: false,
@@ -423,7 +432,10 @@ impl Recorder {
                 status.notes.insert(tab, words);
             }
             match chart::gather(h, obs, t) {
-                Ok(charts) => status.charts = charts,
+                Ok(mut charts) => {
+                    self.local.tick(h, &mut charts, obs, now);
+                    status.charts = charts;
+                }
                 Err(why) if store::busy(&why) => {}
                 Err(why) => self.failed = Some(format!("history not read: {why}")),
             }
