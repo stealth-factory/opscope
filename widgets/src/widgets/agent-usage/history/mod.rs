@@ -167,6 +167,14 @@ pub struct Observation {
     /// What keys the account when there is no stable id: the configured
     /// profile's label, or empty for the default.
     pub profile: String,
+    /// Whose the credential on disk is, as far as the credential itself
+    /// says, in a form that survives a token refresh and changes on a
+    /// sign-in as someone else - Copilot's `host:login` token entry. Empty
+    /// where the credential says nothing of the kind (Claude's tokens both
+    /// rotate on refresh). Compared only with itself: the store keeps the
+    /// one seen beside the last stable id, and an id-less pass whose signer
+    /// differs is filed under no account (OPS-309).
+    pub signer: String,
     /// The `[+]` heading, display only.
     pub heading: String,
     /// The tab this observation is drawn on, so the tab can find its line.
@@ -431,7 +439,7 @@ impl Recorder {
                 // A unified account's tab draws the plan's own history.
                 let at = match h.spacexsi_key_of(o) {
                     Some(key) => h.since("spacexsi", &key),
-                    None => h.since(&o.provider, &h.account_key_of(o)),
+                    None => h.account_key_of(o).and_then(|k| h.since(&o.provider, &k)),
                 };
                 if let Some(at) = at {
                     let e = status.since.entry(o.tab.clone()).or_insert(at);

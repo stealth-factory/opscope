@@ -439,7 +439,11 @@ pub fn gather(h: &History, obs: &[Observation], t: &Thresholds) -> Result<HashMa
     for o in obs {
         // The keys the recorder wrote under: an outage reading with no id
         // maps to the account last seen, and a unified plan's copy to its own.
-        let own = h.account_key_of(o);
+        // One whose credential now names someone else was filed under no
+        // account, so no account's history is drawn for it.
+        let Some(own) = h.account_key_of(o) else {
+            continue;
+        };
         let (provider, key) = match h.spacexsi_key_of(o) {
             Some(k) => ("spacexsi".to_string(), k),
             None => (o.provider.clone(), own.clone()),

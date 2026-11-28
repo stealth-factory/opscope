@@ -513,7 +513,11 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
                 "droid" => crate::droid::history_lanes(&s.droid),
                 _ => Vec::new(),
             });
-            out.push(build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts));
+            let mut o = build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts);
+            if name == "copilot" {
+                o.signer = crate::copilot::history_signer(&s.copilot);
+            }
+            out.push(o);
         }
     }
     // Cursor and Grok, with the unified plan's copy where it applies

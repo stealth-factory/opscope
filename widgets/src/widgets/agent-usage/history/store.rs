@@ -558,13 +558,14 @@ impl History {
     /// The key the unified plan's copy of `o` is kept under. See
     /// [`spacexsi_key`].
     pub fn spacexsi_key_of(&self, o: &Observation) -> Option<String> {
-        let own = self.account_key_of(o);
+        let own = self.account_key_of(o)?;
         spacexsi_key(&self.conn, o, &own).ok().flatten()
     }
 
-    /// The key `o` is stored under. See [`key_of`].
-    pub fn account_key_of(&self, o: &Observation) -> String {
-        key_of(&self.conn, o).unwrap_or_else(|_| o.account_key())
+    /// The key `o` is stored under, or `None` when it is filed under no
+    /// account. See [`key_of`].
+    pub fn account_key_of(&self, o: &Observation) -> Option<String> {
+        key_of(&self.conn, o).unwrap_or_else(|_| Some(o.account_key()))
     }
 
     /// The first sample of any pool of one account, or `None` when it has
@@ -615,9 +616,20 @@ impl History {
         // answered live: the evidence `pool_gone` needs.
         let mut answered: Vec<(i64, Vec<String>)> = Vec::new();
         for o in obs {
-            let key = key_of(&tx, o)?;
-            if o.has_stable_id() && meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
-                meta_set(&tx, &last_account(o), &key)?;
+            // A pass with no id whose credential names someone else: the
+            // live display keeps it, the history files nothing.
+            let Some(key) = key_of(&tx, o)? else {
+                continue;
+            };
+            if o.has_stable_id() {
+                if meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
+                    meta_set(&tx, &last_account(o), &key)?;
+                }
+                // Beside it, whose the credential was on the same pass: what
+                // an id-less pass is compared with.
+                if meta_get(&tx, &last_signer(o))?.as_deref() != Some(o.signer.as_str()) {
+                    meta_set(&tx, &last_signer(o), &o.signer)?;
+                }
             }
             let account = upsert_account(&tx, &o.provider, &key, &o.heading, now)?;
             // Where a shared plan was keyed this pass, remember it for a
@@ -628,6 +640,21 @@ impl History {
                 }
             }
             let spacexsi_account = spacexsi_key(&tx, o, &key)?;
+            // Grok on the plan by itself kept SpaceXSI's history under its
+            // own key; sharing with Cursor keys it by Cursor's. The first
+            // pass that shares moves the one into the other (OPS-309).
+            if o.provider == "grok" {
+                match (o.spacexsi, &spacexsi_account) {
+                    (Some(Spacexsi::Shared), Some(sk)) => {
+                        merge_alone_into_shared(&tx, "grok", &key, sk, now, &mut refold, &mut banks_changed)?
+                    }
+                    (Some(Spacexsi::Alone | Spacexsi::Separate), _) => {
+                        tx.execute("DELETE FROM meta WHERE k = ?1", [merged_key("grok", &key)])
+                            .map_err(sql)?;
+                    }
+                    _ => {}
+                }
+            }
             let sx = o.spacexsi.map(super::spacexsi_name);
             write_lanes(&tx, account, &o.lanes, sx, seen, t.watch_gap_secs, &mut refold)?;
             let live: Vec<String> = o
@@ -900,22 +927,47 @@ fn last_account(o: &Observation) -> String {
     format!("last_account:{}:{profile}", o.provider)
 }
 
+/// The `meta` key holding [`Observation::signer`] as it was on the pass
+/// that last set [`last_account`].
+fn last_signer(o: &Observation) -> String {
+    let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
+    format!("last_signer:{}:{profile}", o.provider)
+}
+
+fn meta_read(c: &Connection, k: &str) -> Result<Option<String>, String> {
+    c.query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [k], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(sql)
+}
+
 /// The key `o` is stored under: its own stable id where it has one. Where it
 /// has none - a provider whose id comes in the live body, during an outage -
 /// the account this provider's profile was last seen under, so the outage's
 /// watch state lands on that account rather than on a `profile:` account
 /// nobody has. Never invented: a provider never seen with an id keeps the
 /// profile key it always had.
-fn key_of(c: &Connection, o: &Observation) -> Result<String, String> {
+///
+/// `None` - filed under no account - when the credential itself says it is
+/// someone else's now: a signer that differs from the one seen beside the
+/// last stable id. Only a stated signer on both sides can say so; where
+/// either is empty the two cannot be compared, and the last account seen
+/// stands, as it does for a provider whose credential names nobody (OPS-309).
+fn key_of(c: &Connection, o: &Observation) -> Result<Option<String>, String> {
     if o.has_stable_id() {
-        return Ok(o.account_key());
+        return Ok(Some(o.account_key()));
     }
-    let last: Option<String> = c
-        .query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [last_account(o)], |r| r.get(0))
-        .optional()
-        .map(Option::flatten)
-        .map_err(sql)?;
-    Ok(last.unwrap_or_else(|| o.account_key()))
+    let Some(last) = meta_read(c, &last_account(o))? else {
+        return Ok(Some(o.account_key()));
+    };
+    if !o.signer.is_empty() {
+        if let Some(was) = meta_read(c, &last_signer(o))?.filter(|w| !w.is_empty()) {
+            if was != o.signer {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(last))
 }
 
 /// The `meta` key holding the unified plan's key a vendor account shared
@@ -936,6 +988,139 @@ fn spacexsi_key(c: &Connection, o: &Observation, own: &str) -> Result<Option<Str
         .optional()
         .map(Option::flatten)
         .map_err(sql)
+}
+
+/// The `meta` key recording that a vendor account's SpaceXSI history under
+/// its own key was moved into the shared plan's, and into which.
+fn merged_key(provider: &str, alone: &str) -> String {
+    format!("spacexsi_merged:{provider}:{alone}")
+}
+
+/// Move the unified plan's history a vendor kept under its own key - while
+/// it was on the plan `Alone` (or `Separate`) - into the key the plan is
+/// `Shared` under now, so the plan keeps one history (OPS-309).
+///
+/// Runs inside the pass's transaction, so two panes racing it move it once:
+/// the second finds [`merged_key`] already naming `shared` and does
+/// nothing. Raw rows are moved, never altered: a pool of the same key
+/// merges into the shared one, where a sample at an instant the shared pool
+/// already holds is the one row not moved (the primary key decides, and the
+/// two are one reading of one plan); any other pool is re-parented whole.
+/// Bank, plan and watch rows move the same way. The derived rows of a pool
+/// that merged are dropped with it, and every pool the move touched is
+/// folded again from its first sample, as are the account's bank events.
+///
+/// Leaving the shared plan forgets the record, so a later `Alone` stretch
+/// moves over in its turn when the two share again. Nothing is ever moved
+/// back: the shared pool cannot say which of its readings were taken alone.
+fn merge_alone_into_shared(
+    tx: &Transaction,
+    provider: &str,
+    alone: &str,
+    shared: &str,
+    now: f64,
+    refold: &mut Vec<(i64, f64)>,
+    banks_changed: &mut Vec<i64>,
+) -> Result<(), String> {
+    let mk = merged_key(provider, alone);
+    if alone == shared || meta_get(tx, &mk)?.as_deref() == Some(shared) {
+        return Ok(());
+    }
+    let src: Option<(i64, f64, f64)> = tx
+        .query_row(
+            "SELECT id, first_seen, last_seen FROM account WHERE provider = 'spacexsi' AND account_key = ?1",
+            [alone],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some((src, first, last)) = src {
+        let dst = upsert_account(tx, "spacexsi", shared, SPACEXSI_HEADING, now)?;
+        tx.execute(
+            "UPDATE account SET first_seen = MIN(first_seen, ?2), last_seen = MAX(last_seen, ?3) WHERE id = ?1",
+            params![dst, first, last],
+        )
+        .map_err(sql)?;
+        let pools: Vec<(i64, String)> = {
+            let mut st = tx.prepare("SELECT id, pool_key FROM pool WHERE account_id = ?1").map_err(sql)?;
+            let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?))).map_err(sql)?;
+            rows.collect::<Result<_, _>>().map_err(sql)?
+        };
+        for (from, pool_key) in pools {
+            let Some(into) = pool_id(tx, dst, &pool_key)? else {
+                tx.execute("UPDATE pool SET account_id = ?2 WHERE id = ?1", params![from, dst])
+                    .map_err(sql)?;
+                refold.push((from, f64::NEG_INFINITY));
+                continue;
+            };
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS})
+                     SELECT ?2, {SAMPLE_COLS} FROM sample WHERE pool_id = ?1"
+                ),
+                params![from, into],
+            )
+            .map_err(sql)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO overage_event(overage_id, event_key, at, amount, model)
+                 SELECT ?2, event_key, at, amount, model FROM overage_event WHERE overage_id = ?1",
+                params![from, into],
+            )
+            .map_err(sql)?;
+            tx.execute("UPDATE OR IGNORE pool_link SET overage_id = ?2 WHERE overage_id = ?1", params![from, into])
+                .map_err(sql)?;
+            tx.execute("UPDATE OR IGNORE pool_link SET included_id = ?2 WHERE included_id = ?1", params![from, into])
+                .map_err(sql)?;
+            // The liveness `gone_at` reads: whichever pool answered last.
+            tx.execute(
+                "UPDATE pool SET first_seen = MIN(first_seen, (SELECT first_seen FROM pool WHERE id = ?1)),
+                     last_pct = CASE WHEN (SELECT last_seen FROM pool WHERE id = ?1) > last_seen
+                                     THEN (SELECT last_pct FROM pool WHERE id = ?1) ELSE last_pct END,
+                     last_seen = MAX(last_seen, (SELECT last_seen FROM pool WHERE id = ?1))
+                  WHERE id = ?2",
+                params![from, into],
+            )
+            .map_err(sql)?;
+            for q in [
+                "DELETE FROM segment WHERE cycle_id IN (SELECT id FROM cycle WHERE pool_id = ?1)",
+                "DELETE FROM reset_event WHERE pool_id = ?1",
+                "DELETE FROM cycle WHERE pool_id = ?1",
+                "DELETE FROM overage_span WHERE overage_id = ?1",
+                "DELETE FROM overage_event WHERE overage_id = ?1",
+                "DELETE FROM pool_link WHERE overage_id = ?1 OR included_id = ?1",
+                "DELETE FROM sample WHERE pool_id = ?1",
+                "DELETE FROM pool WHERE id = ?1",
+            ] {
+                tx.execute(q, [from]).map_err(sql)?;
+            }
+            refold.push((into, f64::NEG_INFINITY));
+        }
+        for table in ["bank_sample", "plan_sample", "watch_state"] {
+            let cols = match table {
+                "bank_sample" => "at, left, credits",
+                "plan_sample" => "at, plan",
+                _ => "at, state, reason",
+            };
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {table}(account_id, {cols}) SELECT ?2, {cols} FROM {table} WHERE account_id = ?1"
+                ),
+                params![src, dst],
+            )
+            .map_err(sql)?;
+            tx.execute(&format!("DELETE FROM {table} WHERE account_id = ?1"), [src])
+                .map_err(sql)?;
+        }
+        tx.execute("DELETE FROM bank_event WHERE account_id = ?1", [src]).map_err(sql)?;
+        tx.execute("DELETE FROM account WHERE id = ?1", [src]).map_err(sql)?;
+        banks_changed.push(dst);
+        // A plan row moved in changes what every pool of the plan is folded
+        // with, the ones that were Cursor's alone included.
+        for pool in pools_of(tx, dst)? {
+            refold.push((pool, f64::NEG_INFINITY));
+        }
+    }
+    meta_set(tx, &mk, shared)
 }
 
 /// What the derived tables were folded with: the thresholds, as text.
@@ -3063,11 +3248,98 @@ mod tests {
         h.record(&[down.clone()], &t, a + H).unwrap();
         assert_eq!(h.count("account"), 1, "an outage made an account of its own");
         assert_eq!(h.count("watch_state"), 1);
-        assert_eq!(h.account_key_of(&down), o.account_key());
+        assert_eq!(h.account_key_of(&down), Some(o.account_key()));
         // A provider never seen with an id keeps its profile key.
         let mut never = down.clone();
         never.provider = "notion".into();
-        assert_eq!(h.account_key_of(&never), "profile:default");
+        assert_eq!(h.account_key_of(&never).as_deref(), Some("profile:default"));
+    }
+
+    /// Copilot as the signer tests read it: a login the live body names, and
+    /// the token entry's `host:login` from the config.
+    fn signed(login: &str, lanes: Vec<Lane>) -> Observation {
+        let mut o = obs(lanes);
+        o.provider = "copilot".into();
+        o.account_id = login.into();
+        o.signer = format!("github.com:{login}");
+        o
+    }
+
+    fn outage(o: &Observation, signer: &str, at: f64) -> Observation {
+        let mut down = o.clone();
+        down.account_id.clear();
+        down.signer = signer.into();
+        down.lanes = vec![lane("primary_window", 30.0, at, at + WEEK, WEEK)];
+        down.watch = Some(super::super::WatchReading {
+            at,
+            state: "network".into(),
+            reason: "timed out".into(),
+        });
+        down
+    }
+
+    #[test]
+    fn an_outage_after_a_token_refresh_keeps_the_account() {
+        let p = temp("signer-refresh");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let o = signed("alice", vec![lane("primary_window", 10.0, a, a + WEEK, WEEK)]);
+        h.record(&[o.clone()], &t, a).unwrap();
+        // The token was refreshed, the entry still names the same sign-in.
+        let down = outage(&o, "github.com:alice", a + H);
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.count("account"), 1);
+        assert_eq!(h.account_key_of(&down), Some(o.account_key()));
+        assert_eq!(h.samples("copilot", &o.account_key(), "primary_window").unwrap().len(), 2);
+        assert_eq!(h.count("watch_state"), 1);
+    }
+
+    #[test]
+    fn an_outage_after_a_sign_in_as_someone_else_files_nothing() {
+        let p = temp("signer-switch");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let o = signed("alice", vec![lane("primary_window", 10.0, a, a + WEEK, WEEK)]);
+        h.record(&[o.clone()], &t, a).unwrap();
+        // Signed in as bob, and the call that would name him failed.
+        let down = outage(&o, "github.com:bob", a + H);
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.account_key_of(&down), None, "bob's pass was filed under some account");
+        assert_eq!(h.count("account"), 1);
+        assert_eq!(h.count("sample"), 1, "bob's reading went into alice's history");
+        assert_eq!(h.count("watch_state"), 0);
+        // Once bob's id arrives his history starts under his own key, and
+        // alice's last-seen pairing moves with it.
+        let bob = signed("bob", vec![lane("primary_window", 31.0, a + 2.0 * H, a + WEEK, WEEK)]);
+        h.record(&[bob.clone()], &t, a + 2.0 * H).unwrap();
+        assert_eq!(h.count("account"), 2);
+        let later = outage(&bob, "github.com:bob", a + 3.0 * H);
+        assert_eq!(h.account_key_of(&later), Some(bob.account_key()));
+    }
+
+    #[test]
+    fn a_provider_whose_credential_names_nobody_keeps_the_last_account_seen() {
+        // Claude: both tokens rotate on refresh, so there is no signer, and
+        // an outage is filed under the account last seen, as before.
+        let p = temp("signer-none");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let mut o = obs(vec![lane("five_hour", 10.0, a, a + 5.0 * H, 5.0 * H)]);
+        o.provider = "claude".into();
+        h.record(&[o.clone()], &t, a).unwrap();
+        let down = outage(&o, "", a + H);
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.account_key_of(&down), Some(o.account_key()));
+        assert_eq!(h.count("account"), 1);
+        assert_eq!(h.count("watch_state"), 1);
+        // A signer where the last stable pass had none cannot be compared
+        // either, so it is not read as a switch.
+        let mut odd = down.clone();
+        odd.signer = "something".into();
+        assert_eq!(h.account_key_of(&odd), Some(o.account_key()));
     }
 
     #[test]
@@ -3812,6 +4084,196 @@ mod tests {
             .collect();
         assert_eq!(pcts, vec![40.0, 48.0]);
         assert_eq!(h.spacexsi_key_of(&grok), Some(plan));
+    }
+
+    /// Grok on the unified plan by itself, as `vendors::observations` keys
+    /// it: SpaceXSI's copy under Grok's own key.
+    fn grok_alone(pct: f64, at: f64) -> Observation {
+        let mut g = obs(vec![lane("credits", pct, at, 600000.0, WEEK)]);
+        g.provider = "grok".into();
+        g.account_id = "grok-acct".into();
+        g.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        g.spacexsi_account = Some(g.account_key());
+        g.plan = Some(super::super::PlanReading { at, plan: "supergrok".into() });
+        g
+    }
+
+    /// Cursor and Grok on one shared account: both write under Cursor's key.
+    fn shared_pair(pct: f64, at: f64) -> (Observation, Observation) {
+        let mut c = obs(vec![lane("weekly_pool", pct, at, 600000.0, WEEK)]);
+        c.provider = "cursor".into();
+        c.account_id = "cursor-acct".into();
+        c.spacexsi = Some(crate::shared::Spacexsi::Shared);
+        c.spacexsi_account = Some(c.account_key());
+        let mut g = grok_alone(pct, at);
+        g.spacexsi = Some(crate::shared::Spacexsi::Shared);
+        g.spacexsi_account = c.spacexsi_account.clone();
+        (c, g)
+    }
+
+    fn spacexsi_pcts(h: &History, key: &str) -> Vec<(f64, f64)> {
+        h.samples("spacexsi", key, "weekly_pool")
+            .unwrap()
+            .iter()
+            .map(|s| (s.at, s.pct.unwrap_or(f64::NAN)))
+            .collect()
+    }
+
+    fn spacexsi_accounts(h: &History) -> i64 {
+        h.conn
+            .query_row("SELECT COUNT(*) FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn grok_s_alone_history_moves_into_the_shared_plan_whole_and_folded() {
+        let p = temp("merge-alone");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        for (i, pct) in [10.0, 20.0, 30.0].into_iter().enumerate() {
+            let at = 5000.0 + i as f64 * 1000.0;
+            h.record(&[grok_alone(pct, at)], &t, at).unwrap();
+        }
+        let alone = grok_alone(0.0, 0.0).account_key();
+        assert_eq!(spacexsi_pcts(&h, &alone).len(), 3);
+        // Cursor signs in to the same account: the plan is shared.
+        let (c, g) = shared_pair(40.0, 9000.0);
+        h.record(&[c.clone(), g.clone()], &t, 9000.0).unwrap();
+        let shared = c.account_key();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (7000.0, 30.0), (9000.0, 40.0)],
+            "a sample was lost or altered in the merge"
+        );
+        assert_eq!(spacexsi_accounts(&h), 1, "the alone key's account was left behind");
+        assert_eq!(h.since("spacexsi", &shared), Some(5000.0));
+        assert_eq!(h.spacexsi_key_of(&g), Some(shared.clone()));
+        // Folded again over the whole merged history: one cycle from the
+        // first alone sample on.
+        let cycles = h.cycles("spacexsi", &shared, "weekly_pool").unwrap();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0].first_obs_at, Some(5000.0));
+        // The plan samples came too, and Grok's own vendor history is as it was.
+        let unified: i64 = h
+            .conn
+            .query_row("SELECT id FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap();
+        assert!(load_plans(&h.conn, unified).unwrap().iter().any(|p| p.at == 5000.0));
+        assert_eq!(h.samples("grok", &alone, "credits").unwrap().len(), 4);
+        assert_eq!(h.meta(&merged_key("grok", &alone)).unwrap(), Some(shared));
+    }
+
+    #[test]
+    fn a_merge_keeps_one_of_two_samples_at_one_instant_and_only_moves_once() {
+        let p = temp("merge-dedup");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        h.record(&[grok_alone(20.0, 6000.0)], &t, 6000.0).unwrap();
+        // Cursor, alone on the same plan beforehand, read it at 6000 too:
+        // the same instant under the key the merge moves into.
+        let (mut c, _) = shared_pair(20.0, 6000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        h.record(&[c.clone()], &t, 6000.0).unwrap();
+        let shared = c.account_key();
+        assert_eq!(spacexsi_pcts(&h, &shared), vec![(6000.0, 20.0)]);
+        let (c, g) = shared_pair(30.0, 9000.0);
+        h.record(&[c.clone(), g.clone()], &t, 9000.0).unwrap();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (9000.0, 30.0)],
+            "the instant both held was kept twice or the merge lost one"
+        );
+        // Once: a later pass does not merge again. A row put under the old
+        // key by hand stays where it is.
+        let alone = grok_alone(0.0, 0.0).account_key();
+        h.conn
+            .execute(
+                "INSERT INTO account(provider, account_key, heading, first_seen, last_seen)
+                 VALUES ('spacexsi', ?1, 'x', 1, 1)",
+                [&alone],
+            )
+            .unwrap();
+        let (c, g) = shared_pair(35.0, 9500.0);
+        h.record(&[c, g], &t, 9500.0).unwrap();
+        assert_eq!(spacexsi_accounts(&h), 2, "the merge ran a second time");
+        assert_eq!(spacexsi_pcts(&h, &shared).len(), 4);
+    }
+
+    #[test]
+    fn two_panes_racing_the_merge_move_it_once_and_lose_nothing() {
+        let p = temp("merge-race");
+        {
+            let mut h = History::open(&p).unwrap();
+            for (i, pct) in [10.0, 20.0, 30.0].into_iter().enumerate() {
+                let at = 5000.0 + i as f64 * 1000.0;
+                h.record(&[grok_alone(pct, at)], &Thresholds::default(), at).unwrap();
+            }
+        }
+        let panes: Vec<_> = (0..2)
+            .map(|_| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    let mut h = History::open(&p).unwrap();
+                    let (c, g) = shared_pair(40.0, 9000.0);
+                    loop {
+                        match h.record(&[c.clone(), g.clone()], &Thresholds::default(), 9000.0) {
+                            Ok(()) => break,
+                            Err(why) if busy(&why) => std::thread::yield_now(),
+                            Err(why) => panic!("{why}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for pane in panes {
+            pane.join().unwrap();
+        }
+        let h = History::open(&p).unwrap();
+        let shared = shared_pair(0.0, 0.0).0.account_key();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (7000.0, 30.0), (9000.0, 40.0)]
+        );
+        assert_eq!(spacexsi_accounts(&h), 1);
+        let open: i64 = h
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cycle c JOIN pool p ON p.id = c.pool_id JOIN account a ON a.id = p.account_id
+                  WHERE a.provider = 'spacexsi' AND c.closed_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 1, "one open cycle on the merged pool");
+    }
+
+    #[test]
+    fn going_back_to_alone_keeps_the_merged_history_where_it_went() {
+        let p = temp("merge-back");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        let (c, g) = shared_pair(20.0, 6000.0);
+        h.record(&[c.clone(), g], &t, 6000.0).unwrap();
+        let shared = c.account_key();
+        // Cursor signs out: Grok is alone on the plan again. Nothing is
+        // moved back - which samples were read alone is not something a
+        // shared pool can tell - and Grok's tab starts a history of its own
+        // from here, as it did the first time.
+        h.record(&[grok_alone(30.0, 7000.0)], &t, 7000.0).unwrap();
+        let alone = grok_alone(0.0, 0.0).account_key();
+        assert_eq!(spacexsi_pcts(&h, &shared), vec![(5000.0, 10.0), (6000.0, 20.0)]);
+        assert_eq!(spacexsi_pcts(&h, &alone), vec![(7000.0, 30.0)]);
+        assert_eq!(h.meta(&merged_key("grok", &alone)).unwrap(), None);
+        // Shared again: that stretch moves over as the first one did.
+        let (c, g) = shared_pair(40.0, 9000.0);
+        h.record(&[c, g], &t, 9000.0).unwrap();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (7000.0, 30.0), (9000.0, 40.0)]
+        );
+        assert_eq!(spacexsi_accounts(&h), 1);
     }
 
     #[test]
