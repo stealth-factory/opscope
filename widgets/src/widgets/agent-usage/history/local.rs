@@ -41,7 +41,10 @@
 //! turn inside it. Only logs written to since `at_lo` are opened; in one
 //! over [`WHOLE_BELOW`], the start of the bracket is found by a binary
 //! search on the lines' own timestamps, and the read stops at the first
-//! line past the bracket. Lines are read through a fixed buffer and capped
+//! line past the bracket. A Codex rollout's lines before that point are
+//! still read, with only its `session_meta` headers parsed: whose the
+//! turns are is the latest header above them, which can sit anywhere in
+//! the file, and that read counts toward the same budget. Lines are read through a fixed buffer and capped
 //! at [`MAX_LINE`], so memory follows the buffer, never the file (the rule
 //! OPS-207 and OPS-208 set for the token history). All of it happens on a
 //! thread of its own, one job at a time, so a pass never waits for it.
@@ -317,6 +320,26 @@ impl Key {
     }
 }
 
+/// What a rollout line says about whose the session is, parsing nothing
+/// but a header: `Some(who)` for a `session_meta` (`None` inside when it
+/// names nobody, or is too long to read whole, so the account is unknown
+/// rather than the previous one's), `None` for any other line. The line's
+/// own `type` is written first, so a header is looked for at its start
+/// only, and a line quoting one further in is not taken for one.
+fn codex_header(buf: &[u8], over: bool) -> Option<Option<String>> {
+    let head = &buf[..buf.len().min(512)];
+    if !head.windows(14).any(|w| w == b"\"session_meta\"") {
+        return None;
+    }
+    if over {
+        return Some(None);
+    }
+    match parse_codex_line(&String::from_utf8_lossy(buf)) {
+        CodexLine::Meta(who) => Some(who),
+        _ => None,
+    }
+}
+
 /// The turns one log holds between `lo` and `hi`, keyed for de-duplication,
 /// appended to `out`. `false` when the byte budget ran out first.
 fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String, f64>) -> bool {
@@ -328,18 +351,33 @@ fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String,
     let (lo, hi) = (key.at_lo(), key.at_hi());
     let mut spent = 0u64;
     let mut session: Option<Option<String>> = None;
-    if key.agent == Agent::Codex {
-        // The session's account, from its first line, before any seek.
-        let mut r = std::io::BufReader::with_capacity(1 << 16, &file);
+    let start = if size <= WHOLE_BELOW { 0 } else { seek_before(&file, size, lo - SLACK, &mut spent) };
+    if key.agent == Agent::Codex && start > 0 {
+        // Whose the turns after `start` are is the latest `session_meta`
+        // before it, which can sit anywhere above: every line up to `start`
+        // is looked at, but only a header is parsed.
+        let mut f = &file;
+        if f.seek(SeekFrom::Start(0)).is_err() {
+            return true;
+        }
+        let mut r = std::io::BufReader::with_capacity(1 << 16, f);
         let mut buf = Vec::new();
-        if let Ok(Some((false, took))) = read_capped(&mut r, &mut buf, MAX_LINE) {
+        let mut at = 0u64;
+        while at < start {
+            if spent > *budget {
+                *budget = 0;
+                return false;
+            }
+            let Ok(Some((over, took))) = read_capped(&mut r, &mut buf, MAX_LINE) else {
+                break;
+            };
             spent += took;
-            if let CodexLine::Meta(who) = parse_codex_line(&String::from_utf8_lossy(&buf)) {
+            at += took;
+            if let Some(who) = codex_header(&buf, over) {
                 session = Some(who);
             }
         }
     }
-    let start = if size <= WHOLE_BELOW { 0 } else { seek_before(&file, size, lo - SLACK, &mut spent) };
     let mut f = &file;
     if f.seek(SeekFrom::Start(start)).is_err() {
         return true;
@@ -363,6 +401,10 @@ fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String,
         };
         spent += took;
         if over {
+            // A header too long to read leaves the account unknown.
+            if key.agent == Agent::Codex && codex_header(&buf, true).is_some() {
+                session = Some(None);
+            }
             continue;
         }
         let line = String::from_utf8_lossy(&buf);
@@ -760,6 +802,45 @@ mod tests {
         let mut c = charts();
         r.tick(&h, &mut c, &obs, opscope_core::now());
         assert_eq!(c["claude"].pools[0].brackets[0].local, want);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_large_rollout_is_bound_to_the_account_its_latest_header_before_the_bracket_names() {
+        // Review on OPS-309: a rollout over WHOLE_BELOW is searched to the
+        // bracket, so a second `session_meta` naming another account,
+        // written before the point the search lands on, was never read and
+        // the turn after it was counted for the first account.
+        let d = dir("codex-large");
+        let filler = |body: &mut String| {
+            let pad = "x".repeat(2000);
+            let mut at = T - 40.0 * 86_400.0;
+            while (body.len() as u64) < WHOLE_BELOW + (4 << 20) {
+                body.push_str(&serde_json::json!({ "timestamp": iso(at), "type": "response_item", "pad": pad }).to_string());
+                body.push('\n');
+                at += 10.0;
+            }
+            assert!(at < T);
+        };
+        let write = |name: &str, first: &str, second: &str| {
+            let mut body = format!("{}\n{}\n", codex_meta(first), codex_meta(second));
+            filler(&mut body);
+            body.push_str(&codex_turn(T + 60.0, 10.0));
+            body.push('\n');
+            std::fs::write(d.join(name), &body).unwrap();
+        };
+        let dirs = vec![d.to_string_lossy().to_string()];
+        write("a.jsonl", "me", "someone-else");
+        let key = Key::new(Agent::Codex, dirs.clone(), "me".into(), T, T + 4000.0);
+        assert_eq!(read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
+        // The other way round, the turn is this account's.
+        write("a.jsonl", "someone-else", "me");
+        assert_eq!(
+            read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone()),
+            Local::Found(Activity { agent: Agent::Codex, first: T + 60.0, last: T + 60.0, turns: 1 })
+        );
+        // A budget too small for the header scan says nothing.
+        assert_eq!(read_bracket(&key, opscope_core::now(), &mut (1 << 20)), Local::Nothing);
         let _ = std::fs::remove_dir_all(&d);
     }
 
