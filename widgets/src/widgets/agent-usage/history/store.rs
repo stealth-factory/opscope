@@ -646,7 +646,11 @@ impl History {
             if o.provider == "grok" {
                 match (o.spacexsi, &spacexsi_account) {
                     (Some(Spacexsi::Shared), Some(sk)) => {
-                        merge_alone_into_shared(&tx, "grok", &key, sk, now, &mut refold, &mut banks_changed)?
+                        // A held-back reading under a pool the merge deleted
+                        // must not be bridged into a pool given its id later.
+                        for gone in merge_alone_into_shared(&tx, "grok", &key, sk, now, &mut refold, &mut banks_changed)? {
+                            seen.remove(&gone);
+                        }
                     }
                     (Some(Spacexsi::Alone | Spacexsi::Separate), _) => {
                         tx.execute("DELETE FROM meta WHERE k = ?1", [merged_key("grok", &key)])
@@ -1017,6 +1021,9 @@ fn merged_key(provider: &str, alone: &str) -> String {
 /// Leaving the shared plan forgets the record, so a later `Alone` stretch
 /// moves over in its turn when the two share again. Nothing is ever moved
 /// back: the shared pool cannot say which of its readings were taken alone.
+///
+/// Returns the ids of the pools it deleted, whose ids SQLite may give to a
+/// pool made later.
 fn merge_alone_into_shared(
     tx: &Transaction,
     provider: &str,
@@ -1025,10 +1032,11 @@ fn merge_alone_into_shared(
     now: f64,
     refold: &mut Vec<(i64, f64)>,
     banks_changed: &mut Vec<i64>,
-) -> Result<(), String> {
+) -> Result<Vec<i64>, String> {
     let mk = merged_key(provider, alone);
+    let mut deleted = Vec::new();
     if alone == shared || meta_get(tx, &mk)?.as_deref() == Some(shared) {
-        return Ok(());
+        return Ok(deleted);
     }
     let src: Option<(i64, f64, f64)> = tx
         .query_row(
@@ -1097,6 +1105,7 @@ fn merge_alone_into_shared(
             ] {
                 tx.execute(q, [from]).map_err(sql)?;
             }
+            deleted.push(from);
             refold.push((into, f64::NEG_INFINITY));
         }
         for table in ["bank_sample", "plan_sample", "watch_state"] {
@@ -1124,7 +1133,8 @@ fn merge_alone_into_shared(
             refold.push((pool, f64::NEG_INFINITY));
         }
     }
-    meta_set(tx, &mk, shared)
+    meta_set(tx, &mk, shared)?;
+    Ok(deleted)
 }
 
 /// What the derived tables were folded with: the thresholds, as text.
@@ -4202,6 +4212,40 @@ mod tests {
         h.record(&[c, g], &t, 9500.0).unwrap();
         assert_eq!(spacexsi_accounts(&h), 2, "the merge ran a second time");
         assert_eq!(spacexsi_pcts(&h, &shared).len(), 4);
+    }
+
+    #[test]
+    fn a_merge_forgets_the_readings_held_back_under_the_pools_it_deleted() {
+        // Review on OPS-309: `seen` is keyed by pool id, and the merge
+        // deletes the alone pool it moves into the shared one. A held-back
+        // reading kept under that id could be bridged into whichever pool
+        // SQLite gives the id to next.
+        let mut h = History::open(&temp("merge-seen")).unwrap();
+        let t = Thresholds::default();
+        let (mut c, _) = shared_pair(20.0, 5000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        h.record(&[c], &t, 5000.0).unwrap();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        // Unchanged a few minutes on: held back, remembered under its pool.
+        h.record(&[grok_alone(10.0, 5400.0)], &t, 5400.0).unwrap();
+        let alone_pool: i64 = h
+            .conn
+            .query_row(
+                "SELECT p.id FROM pool p JOIN account a ON a.id = p.account_id
+                  WHERE a.provider = 'spacexsi' AND a.account_key = ?1 AND p.pool_key = 'weekly_pool'",
+                [grok_alone(0.0, 0.0).account_key()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(h.seen.contains_key(&alone_pool), "the test needs a held-back reading");
+        let (c, g) = shared_pair(30.0, 9000.0);
+        h.record(&[c, g], &t, 9000.0).unwrap();
+        let gone: bool = h
+            .conn
+            .query_row("SELECT NOT EXISTS (SELECT 1 FROM pool WHERE id = ?1)", [alone_pool], |r| r.get(0))
+            .unwrap();
+        assert!(gone, "the merge deletes the alone pool");
+        assert!(!h.seen.contains_key(&alone_pool), "a deleted pool's held-back readings were kept");
     }
 
     #[test]
