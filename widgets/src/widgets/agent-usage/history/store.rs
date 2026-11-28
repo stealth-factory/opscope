@@ -575,6 +575,33 @@ impl History {
         key_of(&self.conn, o).unwrap_or_else(|_| Some(o.account_key()))
     }
 
+    /// Since when `o`'s profile - one config dir - has been signed in as
+    /// `account_key`, as far as this history knows: the first pass that saw
+    /// it so ([`account_since`]); where that was never recorded, the first
+    /// time the account was seen at all, which is no later. `None` when the
+    /// profile was last seen as another account, or the account is not
+    /// stored: nothing of the profile's is the account's then.
+    pub fn signed_in_since(&self, o: &Observation, account_key: &str) -> Option<f64> {
+        let last = meta_read(&self.conn, &last_account(o)).ok()?;
+        if last.as_deref().is_some_and(|l| l != account_key) {
+            return None;
+        }
+        if last.is_some() {
+            if let Some(at) = meta_read(&self.conn, &account_since(o)).ok()?.and_then(|v| v.parse::<f64>().ok()) {
+                return Some(at);
+            }
+        }
+        self.conn
+            .query_row(
+                "SELECT first_seen FROM account WHERE provider = ?1 AND account_key = ?2",
+                params![o.provider, account_key],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
     /// The first sample of any pool of one account, or `None` when it has
     /// none yet.
     pub fn since(&self, provider: &str, account_key: &str) -> Option<f64> {
@@ -631,6 +658,9 @@ impl History {
             if o.has_stable_id() {
                 if meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
                     meta_set(&tx, &last_account(o), &key)?;
+                    // When this profile was first seen signed in as it, so
+                    // its local logs are not given to it from before.
+                    meta_set(&tx, &account_since(o), &now.to_string())?;
                 }
                 // Beside it, whose the credential was on the same pass: what
                 // an id-less pass is compared with.
@@ -940,6 +970,13 @@ impl History {
 fn last_account(o: &Observation) -> String {
     let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
     format!("last_account:{}:{profile}", o.provider)
+}
+
+/// The `meta` key holding when [`last_account`] was last set: the first
+/// pass that saw the profile signed in as the account it names.
+fn account_since(o: &Observation) -> String {
+    let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
+    format!("account_since:{}:{profile}", o.provider)
 }
 
 /// The `meta` key holding [`Observation::signer`] as it was on the pass

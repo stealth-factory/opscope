@@ -32,7 +32,12 @@
 //! (Claude writes one line per content block of a response); a Codex
 //! `token_count` event whose running total moved. Claude transcripts are
 //! those under the projects directory of each config dir signed in as the
-//! account; Codex rollouts count only in sessions whose `session_meta`
+//! account, and only in brackets that began after it was: a transcript
+//! names no account, so a dir signed in as someone else before holds their
+//! turns. When it changed is the first pass that saw the dir as this
+//! account ([`History::signed_in_since`]); where that was never recorded,
+//! the first time the account was seen. A bracket the change fell inside
+//! says nothing. Codex rollouts count only in sessions whose `session_meta`
 //! names the account, as the backfill does, so another account's turns
 //! never land in this one's bracket.
 //!
@@ -547,12 +552,20 @@ impl Reader {
             // One filed under no account has no history of its own to name
             // turns in, and must not pool with another such reading.
             let Some(account) = h.account_key_of(o) else { continue };
-            let mut dirs: Vec<String> = obs
+            // Each with when its config dir was signed in as the account: a
+            // Claude transcript names no account, so a dir's turns are the
+            // account's only from then. A Codex rollout names its own, so
+            // every one is read and its sessions decide.
+            let mut dirs: Vec<(String, f64)> = obs
                 .iter()
                 .filter(|x| x.provider == o.provider && h.account_key_of(x).as_ref() == Some(&account))
-                .flat_map(|x| x.local_logs.iter().cloned())
+                .filter_map(|x| match agent {
+                    Agent::Codex => Some((x, f64::NEG_INFINITY)),
+                    Agent::ClaudeCode => h.signed_in_since(x, &account).map(|since| (x, since)),
+                })
+                .flat_map(|(x, since)| x.local_logs.iter().map(move |d| (d.clone(), since)))
                 .collect();
-            dirs.sort();
+            dirs.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
             dirs.dedup();
             let account_id = if agent == Agent::Codex { o.account_id.clone() } else { String::new() };
             for pool in &mut th.pools {
@@ -561,6 +574,16 @@ impl Reader {
                         b.local = Local::Failed(why.clone());
                         continue;
                     }
+                    // A dir signed in as the account during the bracket
+                    // held someone else's turns before that, and which are
+                    // which cannot be told: the bracket says nothing.
+                    if dirs.iter().any(|(_, since)| *since > b.at_lo && *since <= b.at_hi) {
+                        b.local = Local::Nothing;
+                        continue;
+                    }
+                    let mut dirs: Vec<String> =
+                        dirs.iter().filter(|(_, since)| *since <= b.at_lo).map(|(d, _)| d.clone()).collect();
+                    dirs.dedup();
                     let k = Key::new(agent, account.clone(), account_id.clone(), b.at_lo, b.at_hi);
                     match self.cache.get_mut(&k) {
                         // A pass missing a directory keeps the answer; one
@@ -746,6 +769,8 @@ mod tests {
         h.conn
             .execute_batch(
                 "INSERT INTO account (id, provider, account_key, heading, first_seen, last_seen) VALUES (1, 'claude', 'k', 'CLAUDE', 0, 0);
+                 INSERT INTO account (id, provider, account_key, heading, first_seen, last_seen)
+                   VALUES (2, 'claude', 'profile:default', 'CLAUDE', 0, 0);
                  INSERT INTO pool (id, account_id, pool_key, label, role, unit, first_seen, last_seen) VALUES
                    (1, 1, 'weekly', 'overall 7d', 'included', 'pct', 0, 0),
                    (2, 1, 'extra', 'extra A$50', 'overage', 'money', 0, 0);",
@@ -781,6 +806,10 @@ mod tests {
 
     /// One tab's chart with one long bracket at `T`, nothing read about it.
     fn one_bracket_chart() -> HashMap<String, TabHistory> {
+        bracket_chart(T, T + LONG)
+    }
+
+    fn bracket_chart(at_lo: f64, at_hi: f64) -> HashMap<String, TabHistory> {
         use super::super::chart::{Body, PoolHistory};
         let pool = PoolHistory {
             label: "extra".into(),
@@ -791,15 +820,19 @@ mod tests {
             total: 1,
             since: None,
             body: Body::Overage { bars: Vec::new(), roll_day: None },
-            brackets: vec![Bracket { at_lo: T, at_hi: T + LONG, amount: 2.0, local: Local::Unread }],
+            brackets: vec![Bracket { at_lo, at_hi, amount: 2.0, local: Local::Unread }],
         };
         HashMap::from([("claude".to_string(), TabHistory { pools: vec![pool], expired: Vec::new() })])
     }
 
     /// Tick until the bracket of [`one_bracket_chart`] is read.
     fn tick_until_read(r: &mut Reader, h: &History, obs: &[Observation], now: f64) -> Local {
+        tick_until_read_of(r, h, obs, now, (T, T + LONG))
+    }
+
+    fn tick_until_read_of(r: &mut Reader, h: &History, obs: &[Observation], now: f64, b: (f64, f64)) -> Local {
         for _ in 0..500 {
-            let mut c = one_bracket_chart();
+            let mut c = bracket_chart(b.0, b.1);
             r.tick(h, &mut c, obs, now);
             let got = c["claude"].pools[0].brackets[0].local.clone();
             if got != Local::Unread {
@@ -808,6 +841,59 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Local::Unread
+    }
+
+    #[test]
+    fn a_config_dir_s_turns_count_only_from_when_it_was_signed_in_as_the_account() {
+        // Review on OPS-309: transcripts were bound to the account a config
+        // dir is signed in as now. A dir signed in as someone else when a
+        // bracket was drawn put that account's turns in this one's bracket.
+        let d = dir("reader-switch");
+        let mut h = History::open(&d.join(super::super::store::FILE)).unwrap();
+        let t = super::super::fold::Thresholds::default();
+        let (home, work) = (d.join("home"), d.join("work"));
+        for p in [&home, &work] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        let claude = |profile: &str, id: &str, logs: &std::path::Path| Observation {
+            provider: "claude".into(),
+            account_id: id.into(),
+            profile: profile.into(),
+            tab: if profile.is_empty() { "claude".into() } else { format!("claude:{profile}") },
+            local_logs: vec![logs.to_string_lossy().into()],
+            ..Observation::default()
+        };
+        // Through the bracket, `home` is someone else and `work` is X.
+        h.record(&[claude("", "someone-else", &home), claude("work", "x", &work)], &t, T - 5000.0).unwrap();
+        // Long after it, `home` signs in as X.
+        let switched = T + 3.0 * LONG;
+        let now_obs = vec![claude("", "x", &home), claude("work", "x", &work)];
+        h.record(&now_obs, &t, switched).unwrap();
+        std::fs::write(
+            home.join("s.jsonl"),
+            [claude_line("theirs-1", T + 60.0), claude_line("theirs-2", T + 120.0), claude_line("mine-later", switched + 600.0)]
+                .join("\n"),
+        )
+        .unwrap();
+        std::fs::write(work.join("s.jsonl"), claude_line("mine", T + 90.0)).unwrap();
+        let now = opscope_core::now();
+        let mut r = Reader::default();
+        // X's bracket from before the switch: `work`'s turn only.
+        assert_eq!(
+            tick_until_read(&mut r, &h, &now_obs, now),
+            Local::Found(Activity { agent: Agent::ClaudeCode, first: T + 90.0, last: T + 90.0, turns: 1 })
+        );
+        // A bracket the switch fell inside cannot say whose `home`'s turns
+        // were: nothing.
+        let across = (switched - 600.0, switched - 600.0 + LONG);
+        assert_eq!(tick_until_read_of(&mut r, &h, &now_obs, now, across), Local::Nothing);
+        // After it, `home`'s turns are X's.
+        let after = (switched + 60.0, switched + 60.0 + LONG);
+        assert_eq!(
+            tick_until_read_of(&mut r, &h, &now_obs, now, after),
+            Local::Found(Activity { agent: Agent::ClaudeCode, first: switched + 600.0, last: switched + 600.0, turns: 1 })
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
