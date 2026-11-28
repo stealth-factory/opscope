@@ -82,6 +82,8 @@ pub struct Data {
     /// The rate_limits the newest rollout recorded, for when the live call
     /// cannot run. A snapshot from whenever Codex last spoke to the server.
     limits: Option<serde_json::Value>,
+    /// When `limits` was read from the server: the snapshot's own time.
+    limits_at: f64,
     sessions: usize,
     files: usize,
     /// Modification time of the newest rollout.
@@ -93,6 +95,14 @@ pub struct Data {
     daily: HashMap<String, HashMap<String, Tokens>>,
     /// How current the rollouts behind the totals are.
     pub history: History,
+    /// When `live` was fetched.
+    pub fetched_at: f64,
+    /// The account's `account_id` from `auth.json`: stable across token
+    /// refreshes, which the shared-reading key is not.
+    pub account_id: String,
+    /// The reset-credit inventory as the server sent it, and when: the
+    /// history diffs it by credit.
+    pub bank_raw: Option<(f64, String)>,
 }
 
 impl Data {
@@ -170,6 +180,16 @@ fn codex_account(auth: &serde_json::Value) -> String {
     account_tag(&format!("{}\n{credential}", field("account_id")))
 }
 
+/// The account `auth` is signed in as: `tokens.account_id`, or the root
+/// `account_id` an older layout keeps - the one lookup the live request,
+/// the shared-cache key, the rollout snapshot and the history all use.
+fn account_id_in(auth: &serde_json::Value) -> String {
+    match text(&auth["tokens"], "account_id") {
+        s if !s.is_empty() => s,
+        _ => text(auth, "account_id"),
+    }
+}
+
 /// Register the tokens in `auth`, so no shared reading carries one.
 fn codex_secrets(caches: &mut Caches, auth: &serde_json::Value) {
     const TOKENS: &[&str] = &["access_token", "refresh_token", "id_token", "OPENAI_API_KEY"];
@@ -203,10 +223,7 @@ fn codex_live(auth: Option<&serde_json::Value>) -> Option<serde_json::Value> {
     if tok.is_empty() {
         return Some(local_fact("no token - Codex has not signed in here"));
     }
-    let account = match text(&auth["tokens"], "account_id") {
-        s if !s.is_empty() => s,
-        _ => text(&auth, "account_id"),
-    };
+    let account = account_id_in(auth);
     let authz = format!("Bearer {}", tok);
     let usage_headers = [("Authorization", authz.as_str()), ("User-Agent", "opscope")];
     // The usage call stays as it was. The inventory is account-scoped, so
@@ -544,43 +561,98 @@ fn codex_rates(path: &str) -> Vec<f64> {
     rates
 }
 
-/// The newest rate_limits snapshot on disk.
+/// A rate_limits snapshot a rollout recorded, and when.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snapshot {
+    pub limits: serde_json::Value,
+    /// The snapshot's own timestamp: when Codex read it from the server.
+    pub at: f64,
+}
+
+/// How much of a rollout's first line is read for its `session_meta`.
+const HEAD: u64 = 1024 * 1024;
+
+/// A file's first line, up to [`HEAD`] bytes; `None` when it is longer.
+fn first_line(path: &str) -> Option<String> {
+    use std::io::{BufRead, Read};
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    std::io::BufReader::new(f.take(HEAD)).read_until(b'\n', &mut buf).ok()?;
+    buf.ends_with(b"\n").then(|| String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// The newest snapshot of the main limit in one rollout, from a session of
+/// `account_id`'s: `head` is the rollout's first line, where Codex writes
+/// the `session_meta` naming the account that created the session, and
+/// `tail` its last lines. A metered feature's own limit (`codex_spark`) is
+/// not the account's primary window, and a session that names no account,
+/// or another one, says nothing about this account's.
+pub fn parse_snapshot(head: Option<&str>, tail: &[String], account_id: &str) -> Option<Snapshot> {
+    use crate::history::backfill::{RolloutLine, parse_rollout_line};
+    let meta = |line: &str| match parse_rollout_line(line) {
+        RolloutLine::Meta(who) => Some(who),
+        _ => None,
+    };
+    let mut who: Option<String> = head.and_then(meta).flatten();
+    let mut found = None;
+    for line in tail {
+        if line.contains("\"session_meta\"") {
+            if let Some(w) = meta(line) {
+                who = w;
+            }
+            continue;
+        }
+        if !line.contains("\"rate_limits\"") {
+            continue;
+        }
+        let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let payload = &d["payload"];
+        let limits = match payload["rate_limits"].is_object() {
+            true => &payload["rate_limits"],
+            false => &payload["info"]["rate_limits"],
+        };
+        // Rollouts from before `limit_id` existed are the main limit.
+        if !limits.is_object() || limits["limit_id"].as_str().unwrap_or("codex") != "codex" {
+            continue;
+        }
+        let Some(at) = iso_epoch(&text(&d, "timestamp")) else {
+            continue;
+        };
+        if who.as_deref() == Some(account_id) {
+            found = Some(Snapshot { limits: limits.clone(), at });
+        }
+    }
+    found
+}
+
+/// The newest rate_limits snapshot of this account's main limit on disk.
 ///
 /// The server returns the account's windows with each response and the
 /// rollout writes them down, so the last one in the newest file is the
-/// freshest thing here. Only the tail is read: this is the fallback for a
-/// failed live call, and re-reading every rollout in full to find a number
-/// that is repeated at the end of one of them would be daft.
-fn newest_limits(files: &[String]) -> Option<serde_json::Value> {
-    for path in files.iter().take(SNAPSHOT_FILES) {
-        let mut found = None;
-        for line in tail_lines(path, TAIL) {
-            if !line.contains("\"rate_limits\"") {
-                continue;
-            }
-            let Ok(d) = serde_json::from_str::<serde_json::Value>(&line) else {
-                continue;
-            };
-            let payload = &d["payload"];
-            let limits = match payload["rate_limits"].is_object() {
-                true => payload["rate_limits"].clone(),
-                false => payload["info"]["rate_limits"].clone(),
-            };
-            if limits.is_object() {
-                found = Some(limits);
-            }
-        }
-        if found.is_some() {
-            return found;
-        }
+/// freshest thing here. Only the tail is read, and the first line for the
+/// session's account: this is the fallback for a failed live call, and
+/// re-reading every rollout in full to find a number that is repeated at
+/// the end of one of them would be daft. With no account id there is no
+/// telling whose a snapshot is, and none is used.
+fn newest_limits(files: &[String], account_id: &str) -> Option<Snapshot> {
+    if account_id.is_empty() {
+        return None;
     }
-    None
+    files
+        .iter()
+        .take(SNAPSHOT_FILES)
+        .find_map(|path| parse_snapshot(first_line(path).as_deref(), &tail_lines(path, TAIL), account_id))
 }
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut refuse = String::new();
     let mut live_why = String::new();
     let mut bank = None;
+    // The inventory body as the server sent it, for the history: the raw
+    // credit list, not the bank this machine's clock filtered.
+    let mut bank_body: Option<String> = None;
     // Set inside the fetch, which `cached` does not run on a held reading.
     // A usage miss still carries the inventory body for this frame.
     let mut carried_bank: Option<String> = None;
@@ -604,20 +676,25 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     }) {
         Some(got) if !text(&got, "why").is_empty() => {
             live_why = text(&got, "why");
-            bank = bank_of(got["bank"].as_str(), now());
+            bank_body = got["bank"].as_str().map(str::to_string);
+            bank = bank_of(bank_body.as_deref(), now());
             None
         }
         Some(got) if got.get("u").is_some() => {
-            bank = bank_of(got["bank"].as_str(), now());
+            bank_body = got["bank"].as_str().map(str::to_string);
+            bank = bank_of(bank_body.as_deref(), now());
             Some(got["u"].clone())
         }
         other => {
             if let Some(got) = other.as_ref() {
-                bank = bank_of(got["bank"].as_str(), now());
+                bank_body = got["bank"].as_str().map(str::to_string);
+                bank = bank_of(bank_body.as_deref(), now());
             }
             other
         }
     };
+    // When the reading on screen was fetched - by this pane or another.
+    let fetched_at = taken_at(caches, &key);
     if !refuse.is_empty() {
         live_why = refuse.clone();
         remember_refusal(caches, &key, &refuse);
@@ -626,12 +703,18 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
         if let Some(body) = carried_bank.clone() {
             set_live(caches, &key, serde_json::json!({"why": &refuse, "bank": body}));
             bank = bank_of(Some(&body), now());
+            bank_body = Some(body.clone());
         }
     }
+    let bank_at = taken_at(caches, &key);
+    let account_id = auth.as_ref().map(account_id_in).unwrap_or_default();
     let mut codex = Data {
         live,
         live_why,
         bank,
+        bank_raw: bank_body.map(|body| (bank_at, body)),
+        fetched_at,
+        account_id,
         ..Data::default()
     };
     // Every rollout, not a window of them: the tab's TOTALS and its
@@ -656,7 +739,9 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     codex.last = listed[0].mtime as f64;
     // The quota fallback reads the newest rollout's tail on every pass:
     // it stands in for a live call that failed this pass, not for history.
-    codex.limits = newest_limits(&files);
+    let snapshot = newest_limits(&files, &codex.account_id);
+    codex.limits_at = snapshot.as_ref().map_or(0.0, |s| s.at);
+    codex.limits = snapshot.map(|s| s.limits);
     let asked = caches.readings.asked_at > 0.0;
     let pass = caches
         .rollouts
@@ -697,7 +782,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
 }
 
 /// A window's length, said the way a reader would say it.
-fn window_name(secs: Option<f64>) -> String {
+pub(crate) fn window_name(secs: Option<f64>) -> String {
     let secs = secs.unwrap_or(0.0) as i64;
     if secs >= 86400 {
         format!("{}d", secs / 86400)
@@ -1318,6 +1403,38 @@ pub(crate) fn soonest_when_every_credit_is_dated(bank: &crate::parse::ResetBank)
     soonest
 }
 
+/// Lanes the history keeps and no screen draws (OPS-307): the live credit
+/// balance, which has no ceiling and no cycle. A balance with no ceiling
+/// states what is left as its `limit`. Nothing for an unlimited balance,
+/// and nothing from the rollout snapshot, which is not this account's
+/// reading of now.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let Some(credits) = d.live.as_ref().map(|l| &l["credits"]).filter(|c| c.is_object()) else {
+        return Vec::new();
+    };
+    if credits["unlimited"].as_bool().unwrap_or(false) {
+        return Vec::new();
+    }
+    let balance = match &credits["balance"] {
+        serde_json::Value::String(s) => s.trim().parse::<f64>().ok(),
+        v => v.as_f64(),
+    };
+    let Some(balance) = balance.filter(|b| b.is_finite()) else {
+        return Vec::new();
+    };
+    vec![Lane {
+        label: "credits".into(),
+        pct: f64::NAN,
+        stale: false,
+        pool_key: "credits".into(),
+        unit: Unit::Credits,
+        role: PoolRole::Balance,
+        limit: Some(balance),
+        fetched_at: d.fetched_at,
+        ..Lane::default()
+    }]
+}
+
 /// Plan type and a credit balance - all Codex publishes about the plan.
 ///
 /// Three lines rather than the section Copilot and Cursor get, because three
@@ -1409,6 +1526,12 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: true,
             projected: false,
             apart: false,
+            // The rollout's `primary` is the live call's `primary_window`.
+            pool_key: "primary_window".into(),
+            // The snapshot's own timestamp: when Codex read it from the
+            // server, from a session of this account's main limit.
+            fetched_at: d.limits_at,
+            ..Lane::default()
         }];
     };
     let mut out: Vec<Lane> = Vec::new();
@@ -1426,6 +1549,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: false,
+            pool_key: key.into(),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     for extra in live["additional_rate_limits"]
@@ -1454,9 +1580,29 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: false,
+            pool_key: format!("additional:{}", text(extra, "limit_name")),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// What the history needs from Codex beyond its lanes: the stable account
+/// id, the plan, the raw bank, and why readings stopped.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let plan = d
+        .live
+        .as_ref()
+        .map(|l| text(l, "plan_type"))
+        .filter(|p| !p.is_empty())
+        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+    let bank = d
+        .bank_raw
+        .as_ref()
+        .filter(|(at, _)| *at > 0.0)
+        .and_then(|(at, body)| crate::parse::parse_codex_bank_raw(body, *at));
+    crate::history::Facts { account_id: d.account_id.clone(), plan, bank, why: d.live_why.clone() }
 }
 
 /// The whole tab: the quota, what this machine recorded, what it cost, and
@@ -1527,6 +1673,18 @@ pub fn tab_with_plots(d: &Data, w: usize, _h: usize, cfg: &Config, p: &Palette, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_account_id_is_read_nested_then_at_the_root_everywhere() {
+        // CodeRabbit's case: the live request and the cache key accepted a
+        // root-level `account_id`; the snapshot lookup and the history read
+        // only the nested one, got nothing, and dropped every rollout.
+        let nested = serde_json::json!({"tokens": {"account_id": "acct-n"}, "account_id": "acct-r"});
+        let root = serde_json::json!({"tokens": {"access_token": "t"}, "account_id": "acct-r"});
+        assert_eq!(account_id_in(&nested), "acct-n");
+        assert_eq!(account_id_in(&root), "acct-r");
+        assert_eq!(account_id_in(&serde_json::json!({})), "");
+    }
 
     /// Two `token_count` events with the model named once before them.
     fn one_session(id: &str) -> String {
@@ -1924,6 +2082,82 @@ mod tests {
         assert_eq!(got[2].reset, Some(3000.0));
         // Live is live: nothing here is a cached reading.
         assert!(got.iter().all(|l| !l.stale));
+    }
+
+    #[test]
+    fn a_backfilled_snapshot_lands_in_the_pools_the_live_lanes_write() {
+        // The same windows, as the live endpoint sends them and as a rollout
+        // wrote them down: one pool each, not two (OPS-308).
+        let d = Data {
+            live: Some(
+                serde_json::from_str(
+                    r#"{"rate_limit":{
+                          "primary_window":{"used_percent":26.0,"limit_window_seconds":604800,"reset_at":1000},
+                          "secondary_window":{"used_percent":4.5,"limit_window_seconds":18000,"reset_at":2000}},
+                        "additional_rate_limits":[
+                          {"limit_name":"GPT-5.3-Codex-Spark",
+                           "rate_limit":{"primary_window":{"used_percent":12.0,"limit_window_seconds":86400,"reset_at":3000}}}]}"#,
+                )
+                .expect("a live reading"),
+            ),
+            ..Data::default()
+        };
+        let live: Vec<(String, String, f64, Option<f64>, Option<f64>)> = lanes(&d)
+            .into_iter()
+            .map(|l| (l.pool_key, l.label, l.pct, l.window_secs, l.reset))
+            .collect();
+        let main = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1000},"secondary":{"used_percent":4.5,"window_minutes":300,"resets_at":2000}}}}"#;
+        let spark = r#"{"timestamp":"2026-10-01T00:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_spark","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":12.0,"window_minutes":1440,"resets_at":3000}}}}"#;
+        let mut replayed = Vec::new();
+        for line in [main, spark] {
+            match crate::history::backfill::parse_rollout_line(line) {
+                crate::history::backfill::RolloutLine::Limits(rows) => replayed.extend(rows),
+                other => panic!("{other:?}"),
+            }
+        }
+        let replayed: Vec<(String, String, f64, Option<f64>, Option<f64>)> = replayed
+            .into_iter()
+            .map(|r| (r.pool_key, r.label, r.sample.pct.unwrap(), r.sample.window_secs, r.sample.reset_at))
+            .collect();
+        assert_eq!(replayed, live);
+        // And the tab's own snapshot fallback agrees about the primary.
+        let fallback = Data {
+            limits: Some(serde_json::from_str(r#"{"primary":{"used_percent":71.0,"window_minutes":10080}}"#).unwrap()),
+            ..Data::default()
+        };
+        assert_eq!(lanes(&fallback)[0].pool_key, replayed[0].0);
+    }
+
+    #[test]
+    fn the_snapshot_fallback_reads_the_main_limit_of_this_accounts_sessions_at_its_own_time() {
+        let dir = std::env::temp_dir().join(format!("opscope-codex-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = |who: &str| {
+            format!(r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{{"id":"s","creator_account_id":"{who}"}}}}"#)
+        };
+        let main = r#"{"timestamp":"2026-10-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1000}}}}"#;
+        let spark = r#"{"timestamp":"2026-10-01T02:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex_spark","limit_name":"GPT-5.3-Codex-Spark","primary":{"used_percent":12.0,"window_minutes":1440,"resets_at":3000}}}}"#;
+        // Newest first, as the listing hands them over: another account's
+        // session, then this account's, whose last line is Spark's.
+        let other = dir.join("b.jsonl");
+        std::fs::write(&other, format!("{}\n{main}\n", meta("acct-B"))).unwrap();
+        let ours = dir.join("a.jsonl");
+        std::fs::write(&ours, format!("{}\n{main}\n{spark}\n", meta("acct-A"))).unwrap();
+        let files = vec![other.to_string_lossy().into_owned(), ours.to_string_lossy().into_owned()];
+        let snap = newest_limits(&files, "acct-A").expect("a snapshot");
+        assert_eq!(snap.limits["limit_id"], "codex");
+        assert_eq!(snap.limits["primary"]["used_percent"], 26.0);
+        assert_eq!(snap.at, crate::iso_epoch("2026-10-01T01:00:00Z").unwrap());
+        // Dated by the snapshot, not by the file: the lane the history
+        // writes is this account's, at the time it was read.
+        let d = Data {
+            limits: Some(snap.limits.clone()),
+            limits_at: snap.at,
+            ..Data::default()
+        };
+        assert_eq!(lanes(&d)[0].fetched_at, snap.at);
+        // No session of this account's: nothing to stand in for it.
+        assert!(newest_limits(&files[..1], "acct-A").is_none());
     }
 
     #[test]

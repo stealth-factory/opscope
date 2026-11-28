@@ -73,6 +73,11 @@ const CURSOR_LANES: &[(&str, &str, f64)] = &[
 /// reason at all.
 const SAND_METHOD: &str = "GetSandUsageStatus";
 const SAND_KEY: &str = "cursor:sand";
+
+/// The cache key of one account's sand reading.
+fn sand_key(account: &str) -> String {
+    format!("{SAND_KEY}:{account}")
+}
 /// The allowance is weekly, so this need not be brisk.
 const SAND_TTL: f64 = 900.0;
 
@@ -111,6 +116,13 @@ const EVENTS_TTL: f64 = 1800.0;
 pub struct Data {
     /// [`account_key_in`] of the pass's one read of the credentials.
     pub account: String,
+    /// The `sub` of the access token: the account, which outlives the
+    /// token. Empty when the token is not a readable JWT.
+    pub account_id: String,
+    /// When `live`, `prepaid` and `sand` were each fetched.
+    pub fetched_at: f64,
+    pub prepaid_at: f64,
+    pub sand_at: f64,
     /// The tracking database was readable; the counts below mean something.
     ok: bool,
     why: String,
@@ -430,8 +442,16 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
     } else {
         loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]))
     };
+    // With no ceiling the state carries no scope, so it holds this account's
+    // own spend: a team's total there would be filed as the member's. An
+    // absent `individualUsed` beside a stated team spend is proto3's zero.
+    let own = if shared {
+        loose(&blk["individualUsed"]).or_else(|| loose(&blk["totalSpend"]).map(|_| 0.0))
+    } else {
+        used
+    };
     if hard["noUsageBasedAllowed"].as_bool() == Some(true) {
-        return ExtraState::Disabled { used: used.unwrap_or(0.0) };
+        return ExtraState::Disabled { used: own.unwrap_or(0.0) };
     }
     // INT32_MAX is how GetHardLimit says no limit is set, so it is the
     // answer to "is there a cap" rather than the size of one.
@@ -457,9 +477,9 @@ fn extra_state(live: &serde_json::Value, hard: Option<&serde_json::Value>) -> Ex
     // Cursor said outright that no limit is set. No spend beside it is
     // proto3 omitting a zero, the same reading a stated cap gets above.
     if no_limit {
-        return ExtraState::Unlimited { used: used.unwrap_or(0.0) };
+        return ExtraState::Unlimited { used: own.unwrap_or(0.0) };
     }
-    match used {
+    match own {
         // A spend, no cap from either call, and nothing saying extra usage
         // is forbidden: uncapped. Assumed, not measured.
         Some(used) => ExtraState::Unlimited { used },
@@ -715,8 +735,16 @@ fn month_of(d: &Data) -> (Option<f64>, Option<f64>) {
 /// spend at zero, so it agrees today, and the prepaid call is the one that
 /// states it outright.
 fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
+    additional_state_from(d, live).0
+}
+
+/// [`additional_state`], and whether its spend came from the prepaid
+/// response - which is fetched on its own clock, so a lane carrying that
+/// spend is dated by it rather than by the usage reading.
+fn additional_state_from(d: &Data, live: &serde_json::Value) -> (ExtraState, bool) {
     let mut state = extra_state(live, d.hard.as_ref());
     let spent = d.prepaid.as_ref().and_then(|v| loose(&v["spentThisMonthCents"]));
+    let mut from_prepaid = false;
     // The account's own spend, so a user limit only: against a team pool
     // the pool's total is the figure, and one member's share of it would be
     // a partial presented as the whole.
@@ -724,11 +752,14 @@ fn additional_state(d: &Data, live: &serde_json::Value) -> ExtraState {
         match &mut state {
             ExtraState::Fixed { used, shared: false, .. }
             | ExtraState::Unlimited { used }
-            | ExtraState::Disabled { used } => *used = spent,
+            | ExtraState::Disabled { used } => {
+                *used = spent;
+                from_prepaid = true;
+            }
             ExtraState::Fixed { shared: true, .. } | ExtraState::NotReported { .. } => {}
         }
     }
-    state
+    (state, from_prepaid)
 }
 
 /// The prepaid balance as a lane: spent against paid, labelled with what
@@ -747,7 +778,71 @@ fn credits_lane(d: &Data) -> Option<Lane> {
         stale: false,
         projected: false,
         apart: false,
+        pool_key: "prepaid".into(),
+        unit: usd(),
+        role: PoolRole::Balance,
+        used: Some((paid - left) / 100.0),
+        limit: Some(paid / 100.0),
+        fetched_at: d.prepaid_at,
     })
+}
+
+/// Lanes the history records that the summary draws no bar for: extra
+/// usage with no ceiling - unlimited, or switched off with spend still on
+/// it - in dollars, with no limit and no percentage, under the same pool as
+/// a capped month. Without it an uncapped account kept no overage history,
+/// its per-request charges had no pool to land in, and removing a cap
+/// stopped a month's history mid-way. A team pool's spend is not this
+/// account's and stays out, as it does from the summary's lane.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    let Some(live) = d.live.as_ref() else {
+        return Vec::new();
+    };
+    let on_unified = unified(d);
+    let (state, from_prepaid) = if on_unified {
+        additional_state_from(d, live)
+    } else {
+        (extra_state(live, d.hard.as_ref()), false)
+    };
+    let used = match state {
+        ExtraState::Unlimited { used } | ExtraState::Disabled { used } => used,
+        _ => return Vec::new(),
+    };
+    let (label, key, window_secs, reset) = if on_unified {
+        let (start, end) = month_of(d);
+        let secs = match (start, end) {
+            (Some(s), Some(e)) if e > s => Some((e - s) / 1000.0),
+            _ => None,
+        };
+        (LIMIT_LABEL, "usage_limit", secs, end.map(|e| e / 1000.0))
+    } else {
+        let (secs, reset) = cycle_of(live);
+        ("extra", "extra", secs, reset)
+    };
+    let fetched_at = if from_prepaid && d.prepaid_at > 0.0 { d.prepaid_at } else { d.fetched_at };
+    vec![Lane {
+        label: label.into(),
+        pct: f64::NAN,
+        window_secs,
+        reset,
+        // Kept through a failure only when the figure is the usage call's;
+        // the prepaid response that carries it on the unified plan is asked
+        // on its own.
+        stale: d.live_kept.is_some() && !from_prepaid,
+        projected: false,
+        apart: true,
+        pool_key: key.into(),
+        unit: usd(),
+        role: PoolRole::Overage,
+        used: Some(used / 100.0),
+        limit: None,
+        fetched_at,
+    }]
+}
+
+/// Cursor's money is US dollars, sent in cents.
+fn usd() -> Unit {
+    Unit::Money { currency: "USD".into(), exponent: 2 }
 }
 
 
@@ -1172,6 +1267,7 @@ fn extra_report(d: &Data, live: &serde_json::Value, w: usize, p: &Palette, plots
                 stale: false,
                 projected: false,
                 apart: false,
+                ..Lane::default()
             };
             rows.push(report_bar(&lane, LIMIT_LABEL, label_w, w, p, plots, rows.len()));
             let mut parts: Vec<(String, String)> = vec![
@@ -1683,7 +1779,20 @@ fn event_report(
         "events": t.counted,
         "days": days,
         "start_ms": start_ms, "end_ms": end_ms,
+        // Each charged request at its own instant, for the history's
+        // overage_event rows (OPS-307): the same page, no request added.
+        "charges": crate::history::overage::parse_cursor_charge_rows(events),
     })
+}
+
+/// The charged requests in the events report, for the history: against
+/// the unified plan's usage limit, or the own plan's extra usage.
+pub fn history_charges(d: &Data) -> Vec<crate::history::overage::Charge> {
+    let pool = if unified(d) { "usage_limit" } else { "extra" };
+    d.events
+        .as_ref()
+        .map(|report| crate::history::overage::parse_cursor_charges(report, pool))
+        .unwrap_or_default()
 }
 
 fn cursor_events(tok: Option<&str>, days: i64) -> Result<serde_json::Value, String> {
@@ -1834,6 +1943,12 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
             d.live_kept = Some(k);
         }
     }
+    // When the usage reading on screen was fetched: a kept one's own time.
+    d.fetched_at = match d.live_kept.as_ref() {
+        Some(k) => k.at,
+        None => taken_at(caches, &live_key),
+    };
+    d.account_id = crate::parse::parse_jwt_subject(&text(&auth, "accessToken")).unwrap_or_default();
     // A plan cached for one account must never classify another.
     d.plan = cached(caches, &format!("cursor-plan:{me}"), PLAN_TTL, || cursor_plan(tok));
     // The plan decides which drawing the live figures get, so a failed
@@ -1863,9 +1978,11 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // unified. Best-effort like the hard limit: the pool bar stands without
     // either, and the rows they feed say nothing rather than a guess.
     if is_unified(d.plan.as_ref()) {
-        d.prepaid = cached(caches, &format!("cursor-prepaid:{me}"), LIVE_TTL, || {
+        let prepaid_key = format!("cursor-prepaid:{me}");
+        d.prepaid = cached(caches, &prepaid_key, LIVE_TTL, || {
             cursor_rpc(tok, "GetUserPrepaidBilling", &serde_json::json!({}))
         });
+        d.prepaid_at = taken_at(caches, &prepaid_key);
         d.month = cached(caches, &format!("cursor-month:{me}"), PLAN_TTL, || {
             cursor_rpc(tok, "GetMonthlyBillingCycle", &serde_json::json!({}))
         });
@@ -1899,7 +2016,10 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     // this is an extra allowance, and an account without one is the normal
     // case rather than a fault.
     let mut why = String::new();
-    d.sand = cached(caches, SAND_KEY, SAND_TTL, || match sand_status(tok) {
+    // Keyed by account, as the live reading is: another account's
+    // allowance must never come back from the cache under this one.
+    let sand = sand_key(&me);
+    d.sand = cached(caches, &sand, SAND_TTL, || match sand_status(tok) {
         Ok(v) => Some(v),
         Err(e) => {
             why = e;
@@ -1909,6 +2029,7 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     if d.sand.is_none() && !why.is_empty() {
         d.sand_why = why;
     }
+    d.sand_at = taken_at(caches, &sand);
     let path = under_home(".cursor/ai-tracking/ai-code-tracking.db");
     if !std::path::Path::new(&path).exists() {
         d.why = "no tracking database".into();
@@ -2000,12 +2121,17 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
                 stale: false,
                 projected: false,
                 apart: false,
+                // The same key Grok's reading of this pool carries, so the
+                // unified plan's history holds one pool, not two.
+                pool_key: crate::shared::SPACEXSI_POOL_KEY.into(),
+                fetched_at: d.fetched_at,
+                ..Lane::default()
             });
         }
         // Additional usage resets with the month, not the week, so it takes
         // the monthly cycle - the weekly reset beside a monthly limit is the
         // wrong day, which is what this lane drew before.
-        let state = additional_state(d, live);
+        let (state, from_prepaid) = additional_state_from(d, live);
         if let Some(pct) = extra_lane_pct(&state) {
             let (start, end) = month_of(d);
             let month_secs = match (start, end) {
@@ -2020,6 +2146,14 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
                 stale: false,
                 projected: false,
                 apart: true,
+                pool_key: "usage_limit".into(),
+                unit: usd(),
+                role: PoolRole::Overage,
+                used: extra_cents(&state).map(|(u, _)| u / 100.0),
+                limit: extra_cents(&state).map(|(_, l)| l / 100.0),
+                // The spend is the figure that moves; dated by the response
+                // that carried it.
+                fetched_at: if from_prepaid && d.prepaid_at > 0.0 { d.prepaid_at } else { d.fetched_at },
             });
         }
         // What has been drawn from the prepaid balance, as a share of what
@@ -2042,7 +2176,10 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             reset,
             stale: false,
             projected: false,
-                    apart: false,
+            apart: false,
+            pool_key: (*key).to_string(),
+            fetched_at: d.fetched_at,
+            ..Lane::default()
         });
     }
     // Extra usage is monthly like the three above it and resets with
@@ -2072,6 +2209,12 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             // `grok bot` with a window of its own - and it is still not a
             // fourth slice of them, which is why it takes the break.
             apart: true,
+            pool_key: "extra".into(),
+            unit: usd(),
+            role: PoolRole::Overage,
+            used: extra_cents(&state).map(|(u, _)| u / 100.0),
+            limit: extra_cents(&state).map(|(_, l)| l / 100.0),
+            fetched_at: d.fetched_at,
         });
     }
     // Its own window, not the billing cycle's. The summary ranks lanes
@@ -2086,9 +2229,32 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             stale: false,
             projected: false,
             apart: true,
+            pool_key: "sand".into(),
+            fetched_at: d.sand_at,
+            ..Lane::default()
         });
     }
     out
+}
+
+/// A fixed cap's spend and ceiling, in cents; `None` in any other state.
+fn extra_cents(state: &ExtraState) -> Option<(f64, f64)> {
+    match state {
+        ExtraState::Fixed { used, limit, .. } => Some((*used, *limit)),
+        _ => None,
+    }
+}
+
+/// What the history needs from Cursor beyond its lanes: the account the
+/// token names, the plan, and why the usage call is not answering.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let plan = d
+        .plan
+        .as_ref()
+        .map(|p| text(&p["planInfo"], "planName"))
+        .filter(|p| !p.is_empty() && d.fetched_at > 0.0)
+        .map(|plan| crate::history::PlanReading { at: d.fetched_at, plan });
+    crate::history::Facts { account_id: d.account_id.clone(), plan, bank: None, why: d.live_why.clone() }
 }
 
 /// The three lanes cursor-agent's Usage view shows, plus the cycle.
@@ -4228,6 +4394,77 @@ mod tests {
         assert!(squeeze(&text).contains("usage limit no limit set"), "{text}");
         assert!(squeeze(&text).contains("$3.50 this month"), "{text}");
         assert!(!has_bar(&text, "usage limit"), "a bar of no limit: {text}");
+    }
+
+    #[test]
+    fn uncapped_extra_usage_is_kept_in_the_history_with_no_bar() {
+        // Codex's case: unlimited or switched-off extra usage has no
+        // percentage, so the gate that keeps it off the summary also kept
+        // it out of the history, and its charges had no pool to land in.
+        let mut d = unified_data(false);
+        d.fetched_at = 1_000.0;
+        d.prepaid_at = 1_100.0;
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        assert!(!lanes(&d).iter().any(|l| l.pool_key == "usage_limit"), "the summary draws no bar");
+        let got = history_lanes(&d);
+        assert_eq!(got.len(), 1);
+        let l = &got[0];
+        assert_eq!((l.pool_key.as_str(), l.role), ("usage_limit", PoolRole::Overage));
+        assert_eq!((l.used, l.limit, l.fetched_at), (Some(3.5), None, 1_100.0));
+        assert!(l.pct.is_nan() && l.reset.is_some());
+        // An account's own plan, uncapped: the billing cycle's `extra` pool.
+        let mut v = measured();
+        v["spendLimitUsage"] = serde_json::json!({"totalSpend": 964, "individualUsed": 964, "limitType": "user"});
+        let own = Data { live: Some(v), hard: Some(serde_json::json!({})), fetched_at: 2_000.0, ..Data::default() };
+        let got = history_lanes(&own);
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].pool_key.as_str(), got[0].used), ("extra", Some(9.64)));
+        // A capped month is the summary's lane already, and is not doubled.
+        assert!(history_lanes(&unified_data(true)).is_empty());
+    }
+
+    #[test]
+    fn a_team_s_spend_with_no_ceiling_is_not_filed_as_the_member_s() {
+        // CodeRabbit's case: a team pool reporting $40 in all and $9.64 of
+        // this member's, uncapped or switched off. The history recorded the
+        // $40 as the signed-in account's extra spend.
+        for hard in [serde_json::json!({"hardLimit": "2147483647"}), serde_json::json!({"noUsageBasedAllowed": true})] {
+            let mut v = measured();
+            v["spendLimitUsage"] = serde_json::json!({"totalSpend": 4000, "individualUsed": 964, "limitType": "team"});
+            let d = Data { live: Some(v.clone()), hard: Some(hard.clone()), fetched_at: 2_000.0, ..Data::default() };
+            let got = history_lanes(&d);
+            assert_eq!(got.len(), 1, "{hard}");
+            assert_eq!(got[0].used, Some(9.64), "{hard}");
+            // No personal figure beside the team's is proto3's zero.
+            v["spendLimitUsage"] = serde_json::json!({"totalSpend": 4000, "limitType": "team"});
+            let d = Data { live: Some(v), hard: Some(hard.clone()), fetched_at: 2_000.0, ..Data::default() };
+            assert_eq!(history_lanes(&d)[0].used, Some(0.0), "{hard}");
+        }
+    }
+
+    #[test]
+    fn spend_the_prepaid_response_supplied_is_dated_by_that_response() {
+        // CodeRabbit's case: the usage request failed and the prepaid one
+        // answered, so the usage limit's spend is the prepaid figure, and
+        // its time is the prepaid response's, not the retained usage time.
+        let mut d = unified_data(true);
+        d.fetched_at = 1_000.0;
+        d.prepaid_at = 1_600.0;
+        d.prepaid.as_mut().unwrap()["spentThisMonthCents"] = serde_json::json!("350");
+        let lane = lanes(&d).into_iter().find(|l| l.pool_key == "usage_limit").expect("the usage limit lane");
+        assert_eq!(lane.used, Some(3.5));
+        assert_eq!(lane.fetched_at, 1_600.0);
+        // With no prepaid spend, the usage reading's own time.
+        d.prepaid.as_mut().unwrap().as_object_mut().unwrap().remove("spentThisMonthCents");
+        if let Some(lane) = lanes(&d).into_iter().find(|l| l.pool_key == "usage_limit") {
+            assert_eq!(lane.fetched_at, 1_000.0);
+        }
+    }
+
+    #[test]
+    fn the_sand_reading_is_cached_per_account() {
+        assert_ne!(sand_key("a"), sand_key("b"));
+        assert!(sand_key("a").starts_with(SAND_KEY));
     }
 
     #[test]

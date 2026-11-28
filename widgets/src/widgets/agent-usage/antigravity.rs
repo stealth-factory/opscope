@@ -443,6 +443,8 @@ pub struct Data {
     /// How current the prompt count is.
     pub prompts_history: History,
     last: f64,
+    /// When `quota` was fetched, from whichever source answered.
+    fetched_at: f64,
 }
 
 /// Whether a command line belongs to Antigravity's language server.
@@ -671,6 +673,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         quota: local
             .and_then(|got| got.as_array().cloned())
             .unwrap_or_default(),
+        fetched_at: taken_at(caches, "antigravity-quota"),
         ..Data::default()
     };
     // Local first: it is the app's own answer and moves as the app is used.
@@ -702,6 +705,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
                 Some(serde_json::Value::Array(groups)) => {
                     d.quota = groups;
                     d.quota_from = From::Agy;
+                    d.fetched_at = taken_at(caches, KEY);
                 }
                 held => {
                     why = held.map(|v| text(&v, "why")).unwrap_or(asked);
@@ -728,6 +732,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
             Some(groups) => {
                 d.quota = groups;
                 d.quota_from = From::Agy;
+                d.fetched_at = taken_at(caches, "antigravity-agy");
                 why.clear();
             }
             // The later failure is the more specific one, and it names what
@@ -832,10 +837,28 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 stale: false,
                 projected: false,
                 apart: group_start > 0 && out.len() == group_start,
+                // The group's own name and the bucket's window, as sent.
+                pool_key: format!("{display}:{window}"),
+                fetched_at: d.fetched_at,
+                ..Lane::default()
             });
         }
     }
     out
+}
+
+/// What the history needs from Antigravity beyond its lanes. No stable
+/// account id is read, so the account is keyed on the profile, and no plan
+/// is read either: the tier came from Google's Code Assist endpoints, which
+/// are no longer called.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    crate::history::Facts { account_id: String::new(), plan: None, bank: None, why: d.quota_why.clone() }
+}
+
+/// The lanes the history keeps for Antigravity: the same as [`lanes`], one
+/// pool per quota group and window.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    lanes(d)
 }
 
 /// One bar per limit, grouped by the model family it covers.
@@ -1459,6 +1482,21 @@ mod tests {
     }
 
     #[test]
+    fn the_history_keeps_one_pool_per_group_and_window() {
+        // Each bucket is its own pool, keyed on the group's name and the
+        // window as sent, and dated by whichever source answered.
+        let d = Data { quota: agy_report(), quota_from: From::Agy, fetched_at: 1_000.0, ..Data::default() };
+        let kept = history_lanes(&d);
+        let keys: Vec<&str> = kept.iter().map(|l| l.pool_key.as_str()).collect();
+        assert_eq!(keys.len(), 4);
+        let unique: HashSet<&str> = keys.iter().copied().collect();
+        assert_eq!(unique.len(), 4, "every bucket has its own pool: {keys:?}");
+        assert!(kept.iter().all(|l| l.fetched_at == 1_000.0));
+        // No tier is read any more, so no plan reading.
+        assert!(history_facts(&d).plan.is_none());
+    }
+
+    #[test]
     fn agy_starts_only_when_antigravity_was_chosen_and_nothing_has_answered() {
         assert!(may_start_agy(true, true, false));
         assert!(!may_start_agy(false, true, false), "a hidden agent still starts");
@@ -1796,6 +1834,7 @@ mod tests {
             prompts: 42,
             prompts_history: Default::default(),
             last: now() - 3600.0,
+            fetched_at: now() - 60.0,
         };
         for w in [20usize, 40, 80, 200] {
             let plain = tab(&d, w, 40, &cfg, &p).join("\n");

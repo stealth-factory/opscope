@@ -98,8 +98,22 @@ pub struct Data {
     /// Why the billing request did not answer, so the billing drawn without
     /// it is not taken for all of it.
     subscription_why: String,
-    /// When the reading was taken.
+    /// When the reading was taken: the oldest of the answers drawn, for the
+    /// heading's "read ... ago".
     read_at: f64,
+    /// When the credits answer itself was fetched, which dates the credit
+    /// lanes: the answers are cached apart and can be of different ages.
+    credits_at: f64,
+    /// The same answer parsed as of `credits_at`, for the history. The tab
+    /// reads `credits`, parsed now, so a bonus lapsed since the fetch is
+    /// gone from it at once; the history dates its lanes by the fetch, and a
+    /// balance that only held after it would be a figure filed at a time it
+    /// was not true.
+    credits_read: Option<PerplexityCredits>,
+    /// When the session answer that named the plan was fetched.
+    plan_at: f64,
+    /// When the weekly limit's reading was taken.
+    quota_at: f64,
     /// Where the cookie came from: `config`, `env`, or empty for none.
     source: &'static str,
     /// The variable read, when `source` is `env`.
@@ -254,9 +268,11 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(got) = got.as_ref().filter(|_| d.why.is_empty()) {
         d.why = text(got, "why");
         d.read_at = num(got, "at");
+        d.credits_at = d.read_at;
         // A bonus that has expired since the reading is gone now, not at
         // the next fetch.
         d.credits = parse_perplexity_credits(&text(got, "body"), now());
+        d.credits_read = parse_perplexity_credits(&text(got, "body"), d.credits_at);
     }
     let qkey = format!("{key}:quota");
     let mut refused = String::new();
@@ -296,6 +312,8 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
         refused.clear();
     }
     d.quota_why = refused;
+    // When the weekly reading was fetched; a kept one carries its own.
+    d.quota_at = got.as_ref().map(|g| num(g, "at")).filter(|at| *at > 0.0).unwrap_or_else(|| taken_at(caches, &qkey));
     // The plan is only a label in the heading, but a session that failed
     // is said, so it is not taken for one that names no plan.
     let pkey = format!("{key}:plan");
@@ -316,6 +334,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     if let Some(why) = plan.as_ref().map(|g| text(g, "why")).filter(|_| d.plan_why.is_empty()) {
         d.plan_why = why;
     }
+    d.plan_at = plan.as_ref().map_or(0.0, |g| num(g, "at"));
     d.plan = plan.and_then(|g| parse_perplexity_plan(&text(&g, "body")));
     let skey = format!("{key}:subscription");
     let mut refused = String::new();
@@ -426,6 +445,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: q.resets.is_some_and(|r| r <= now()) || d.quota_kept.is_some(),
             projected: false,
             apart: false,
+            pool_key: "weekly".into(),
+            fetched_at: d.quota_kept.as_ref().map_or(d.quota_at, |k| k.at),
+            ..Lane::default()
         });
     }
     let Some(c) = d.credits.as_ref() else {
@@ -441,9 +463,15 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale: length.and(c.renews).is_some_and(|r| r <= now()) || d.kept.is_some(),
             projected: false,
             apart: false,
+            pool_key: "recurring".into(),
+            unit: Unit::Credits,
+            used: Some(c.recurring.used),
+            limit: Some(c.recurring.total),
+            fetched_at: d.credits_at,
+            ..Lane::default()
         });
     }
-    for (label, pool) in [("credits", &c.purchased), ("bonus", &c.bonus)] {
+    for (label, key, pool) in [("credits", "purchased", &c.purchased), ("bonus", "bonus", &c.bonus)] {
         if pool.total > 0.0 {
             out.push(Lane {
                 label: label.into(),
@@ -453,10 +481,92 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 stale: d.kept.is_some(),
                 projected: false,
                 apart: false,
+                pool_key: key.into(),
+                unit: Unit::Credits,
+                role: PoolRole::Balance,
+                used: Some(pool.used),
+                limit: Some(pool.total),
+                fetched_at: d.credits_at,
             });
         }
     }
     out
+}
+
+/// The lanes the history keeps: [`lanes`], with each balance carrying the
+/// soonest dated expiry among its grants, as the answer states it, as its
+/// `reset`. A balance has no reset to count down to, so the summary's lanes
+/// keep none; the history needs it to read a bonus lapsing beside another,
+/// which takes its amount out of the pool, as expiry rather than spend
+/// (`history::overage::balance_moves`). The never-expires marker is no date.
+pub fn history_lanes(d: &Data) -> Vec<Lane> {
+    // The credit lanes as they stood when fetched, never as reparsed now.
+    let as_read;
+    let d = match d.credits_read.as_ref() {
+        Some(c) if d.credits.as_ref() != Some(c) => {
+            as_read = Data { credits: Some(c.clone()), ..d.clone() };
+            &as_read
+        }
+        _ => d,
+    };
+    let mut out = lanes(d);
+    let Some(c) = d.credits.as_ref() else {
+        return out;
+    };
+    // The summary draws no bar for an empty pool, but an empty pool read
+    // live is a reading: without it, the last grant lapsing never reaches
+    // the history, and a later grant reads as a top-up from where the
+    // lapsed one stood. A kept (cached) answer is not live and adds none.
+    if d.kept.is_none() {
+        for (label, key, pool) in [("credits", "purchased", &c.purchased), ("bonus", "bonus", &c.bonus)] {
+            if pool.total <= 0.0 && !out.iter().any(|l| l.pool_key == key) {
+                out.push(Lane {
+                    label: label.into(),
+                    pct: 0.0,
+                    pool_key: key.into(),
+                    unit: Unit::Credits,
+                    role: PoolRole::Balance,
+                    used: Some(0.0),
+                    limit: Some(0.0),
+                    fetched_at: d.credits_at,
+                    ..Lane::default()
+                });
+            }
+        }
+    }
+    // Lapsed bonuses are already out of `grants`; a bought grant past its
+    // date is still listed, and its expiry is no longer ahead of anything.
+    let soonest = |kind: &str| {
+        c.grants
+            .iter()
+            .filter(|g| g.kind == kind && !g.never_expires())
+            .filter_map(|g| g.expires)
+            .filter(|t| *t > d.credits_at)
+            .min_by(f64::total_cmp)
+    };
+    for lane in &mut out {
+        match lane.pool_key.as_str() {
+            "bonus" => lane.reset = soonest("promotional"),
+            "purchased" => lane.reset = soonest("purchased"),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// What the history needs from Perplexity beyond its lanes. No stable
+/// account id is read, so the account is keyed on the profile.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    crate::history::Facts {
+        account_id: String::new(),
+        plan: d
+            .plan
+            .clone()
+            .filter(|p| !p.is_empty() && d.plan_at > 0.0)
+            .map(|plan| crate::history::PlanReading { at: d.plan_at, plan }),
+        bank: None,
+        why: if d.why.is_empty() { d.quota_why.clone() } else { d.why.clone() },
+    }
 }
 
 impl Data {
@@ -466,7 +576,9 @@ impl Data {
         let read_at = now() - 60.0;
         Data {
             credits: parse_perplexity_credits(raw, read_at),
+            credits_read: parse_perplexity_credits(raw, read_at),
             read_at,
+            credits_at: read_at,
             source: "config",
             ..Data::default()
         }
@@ -1345,6 +1457,26 @@ mod tests {
     }
 
     #[test]
+    fn credit_lanes_and_the_plan_are_dated_by_their_own_answers() {
+        // CodeRabbit's case: the answers are cached apart. The heading's
+        // time is the oldest of them, but credits refreshed at T+300 beside
+        // a weekly limit held from T are credits read at T+300, and a plan
+        // the session named at T+600 is a plan seen then.
+        let mut d = Data::answered(CARRIED_OVER);
+        d.read_at = 1_000.0;
+        d.credits_at = 1_300.0;
+        d.plan_at = 1_600.0;
+        d.plan = Some("max".into());
+        let credit_lanes: Vec<Lane> = lanes(&d).into_iter().filter(|l| l.unit == Unit::Credits).collect();
+        assert!(!credit_lanes.is_empty());
+        assert!(credit_lanes.iter().all(|l| l.fetched_at == 1_300.0));
+        assert_eq!(history_facts(&d).plan.unwrap().at, 1_600.0);
+        // A plan with no session time of its own is not dated by another's.
+        d.plan_at = 0.0;
+        assert!(history_facts(&d).plan.is_none());
+    }
+
+    #[test]
     fn billing_alone_is_still_a_tab() {
         // With credits failed and no weekly limit (Max, it may be), the
         // billing that did answer fell through to the failure panel.
@@ -1461,6 +1593,50 @@ mod tests {
                 assert_eq!(kept, want, "width {w}, indent {indent}");
             }
         }
+    }
+
+    #[test]
+    fn the_history_dates_the_bonus_balance_by_its_next_expiry() {
+        // Codex's case: a grant lapsing beside a live one lowers the bonus
+        // balance, and with no expiry on the sample the history booked the
+        // fall as spend.
+        let soon = (now() + 86400.0).floor();
+        let d = Data::answered(&format!(
+            r#"{{"credit_grants":[{{"type":"promotional","amount_cents":100,"expires_at_ts":{soon}}},
+            {{"type":"promotional","amount_cents":200,"expires_at_ts":{}}}],"total_usage_cents":0}}"#,
+            soon + 86400.0 * 30.0
+        ));
+        let kept = history_lanes(&d);
+        let bonus = kept.iter().find(|l| l.pool_key == "bonus").unwrap();
+        assert_eq!(bonus.reset, Some(soon));
+        // The tab's bar still keeps no clock.
+        assert_eq!(lanes(&d).iter().find(|l| l.pool_key == "bonus").unwrap().reset, None);
+    }
+
+    #[test]
+    fn a_kept_answer_files_the_balance_it_held_when_fetched() {
+        // CodeRabbit's case: a credits answer kept through a failure is
+        // reparsed now, so a bonus that lapsed since drops out of it - and
+        // the history filed that lower balance at the original fetch time.
+        let read_at = now() - 3.0 * 3600.0;
+        let lapsed = now() - 3600.0;
+        let raw = format!(
+            r#"{{"credit_grants":[{{"type":"promotional","amount_cents":100,"expires_at_ts":{lapsed}}},
+            {{"type":"promotional","amount_cents":200,"expires_at_ts":{}}}],"total_usage_cents":0}}"#,
+            now() + 86400.0 * 30.0
+        );
+        let d = Data {
+            credits: parse_perplexity_credits(&raw, now()),
+            credits_read: parse_perplexity_credits(&raw, read_at),
+            read_at,
+            credits_at: read_at,
+            source: "config",
+            ..Data::default()
+        };
+        let bonus = |lanes: Vec<Lane>| lanes.into_iter().find(|l| l.pool_key == "bonus").and_then(|l| l.limit);
+        // The tab shows the lapse at once; the history keeps the fetch's.
+        assert_eq!(bonus(lanes(&d)), Some(200.0));
+        assert_eq!(bonus(history_lanes(&d)), Some(300.0));
     }
 
     #[test]
@@ -1713,5 +1889,129 @@ mod tests {
         assert_ne!(a, cache_key("two"));
         assert_eq!(a, cache_key("one"));
         assert!(!a.contains("one"));
+    }
+
+    /// The history's reading of `raw`, fetched at `at`.
+    fn read_at(raw: &str, at: f64) -> Data {
+        Data {
+            credits: parse_perplexity_credits(raw, at),
+            read_at: at,
+            credits_at: at,
+            source: "config",
+            ..Data::default()
+        }
+    }
+
+    /// Records each `(raw, at)` reading through the history file and reads
+    /// back the bonus balance's (spent, expired) across all of them.
+    fn bonus_moves(readings: &[(&str, f64)]) -> (f64, f64) {
+        use crate::history::{Observation, fold::Thresholds, store::History};
+        let dir = std::env::temp_dir().join(format!(
+            "opscope-perplexity-expiry-{}-{}",
+            std::process::id(),
+            now().to_bits()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut h = History::open(&dir.join(crate::history::store::FILE)).unwrap();
+        let obs = |d: &Data| Observation {
+            provider: "perplexity".into(),
+            tab: "perplexity".into(),
+            lanes: history_lanes(d),
+            ..Observation::default()
+        };
+        for (raw, at) in readings {
+            h.record(&[obs(&read_at(raw, *at))], &Thresholds::default(), *at).unwrap();
+        }
+        let key = obs(&Data::default()).account_key();
+        let months = h.balance_months("perplexity", &key, "bonus").unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        (months.iter().map(|m| m.spent).sum(), months.iter().map(|m| m.expired).sum())
+    }
+
+    #[test]
+    fn a_bonus_lapsing_beside_another_is_expiry_in_the_history_not_spend() {
+        // Codex's case on #681: two unused bonuses of 100 and 200, read
+        // either side of the first one's expiry. The parser drops the lapsed
+        // grant from the pool, and with no expiry on the samples the fall
+        // read as 100 spent that nobody spent.
+        let a = 1_790_000_000.0;
+        let (first, second) = (a + 2.0 * 3600.0, a + 30.0 * 86400.0);
+        let raw = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":{first}}},
+                {{"type":"promotional","amount_cents":200,"remaining_cents":200,"expires_at_ts":{second}}}]}}"#
+        );
+        assert_eq!(bonus_moves(&[(&raw, a), (&raw, a + 4.0 * 3600.0)]), (0.0, 100.0));
+    }
+
+    #[test]
+    fn a_fall_past_what_the_lapsed_bonus_held_is_still_spend() {
+        // The 100 lapses and 30 of the 200 is spent in the same bracket: the
+        // pool falls 130, of which no more than the 100 can be expiry.
+        let a = 1_790_000_000.0;
+        let (first, second) = (a + 2.0 * 3600.0, a + 30.0 * 86400.0);
+        let grants = |used: f64| {
+            format!(
+                r#"{{"total_usage_cents":{used},"credit_grants":[
+                    {{"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":{first}}},
+                    {{"type":"promotional","amount_cents":200,"remaining_cents":{},"expires_at_ts":{second}}}]}}"#,
+                200.0 - used
+            )
+        };
+        let (before, after) = (grants(0.0), grants(30.0));
+        assert_eq!(bonus_moves(&[(&before, a), (&after, a + 4.0 * 3600.0)]), (30.0, 100.0));
+        // With no expiry in the bracket, the same fall is all spend.
+        assert_eq!(bonus_moves(&[(&before, a), (&after, a + 3600.0)]), (30.0, 0.0));
+    }
+
+    #[test]
+    fn the_last_bonus_lapsing_is_expiry_even_when_a_new_grant_follows() {
+        // Codex's second case on #681: an unused 100 lapses, the next answer
+        // holds no bonus at all, then a new 200 arrives. Without the empty
+        // reading the history saw 100 then 200: a 100 top-up and no expiry.
+        let a = 1_790_000_000.0;
+        let lapses = a + 2.0 * 3600.0;
+        let one = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":{lapses}}}]}}"#
+        );
+        let none = r#"{"total_usage_cents":0,"credit_grants":[]}"#;
+        let new = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"promotional","amount_cents":200,"remaining_cents":200,"expires_at_ts":{}}}]}}"#,
+            a + 40.0 * 86400.0
+        );
+        let moves = bonus_moves(&[(&one, a), (none, a + 4.0 * 3600.0), (&new, a + 5.0 * 86400.0)]);
+        assert_eq!(moves, (0.0, 100.0));
+    }
+
+    #[test]
+    fn an_empty_pool_is_recorded_only_from_a_live_answer() {
+        let a = 1_790_000_000.0;
+        let none = r#"{"total_usage_cents":0,"credit_grants":[]}"#;
+        let live = read_at(none, a);
+        let bonus = |d: &Data| history_lanes(d).into_iter().find(|l| l.pool_key == "bonus");
+        assert_eq!(bonus(&live).and_then(|l| l.limit), Some(0.0));
+        assert!(lanes(&live).iter().all(|l| l.pool_key != "bonus"), "the summary still draws no empty bar");
+        let kept = Data { kept: Some(Kept { at: a - 600.0, why: "timed out".into() }), ..read_at(none, a) };
+        assert!(bonus(&kept).is_none(), "a kept answer is not a reading of an empty pool");
+    }
+
+    #[test]
+    fn the_history_lanes_carry_each_balance_s_soonest_dated_expiry_and_the_summary_none() {
+        let a = 1_790_000_000.0;
+        let raw = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"purchased","amount_cents":500,"remaining_cents":500,"expires_at_ts":253402214400}},
+                {{"type":"promotional","amount_cents":100,"remaining_cents":100,"expires_at_ts":{}}},
+                {{"type":"promotional","amount_cents":200,"remaining_cents":200,"expires_at_ts":{}}}]}}"#,
+            a + 9.0 * 86400.0,
+            a + 3.0 * 86400.0
+        );
+        let d = read_at(&raw, a);
+        let reset = |lanes: Vec<Lane>, key: &str| lanes.into_iter().find(|l| l.pool_key == key).unwrap().reset;
+        assert_eq!(reset(history_lanes(&d), "bonus"), Some(a + 3.0 * 86400.0));
+        assert_eq!(reset(history_lanes(&d), "purchased"), None, "never expires is no date");
+        assert_eq!(reset(lanes(&d), "bonus"), None, "a balance has no countdown on the summary");
     }
 }

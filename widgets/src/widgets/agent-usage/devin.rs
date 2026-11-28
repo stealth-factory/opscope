@@ -50,6 +50,8 @@ const REPORT_TTL: f64 = 300.0;
 pub struct Data {
     quota: Option<DevinQuota>,
     read_at: f64,
+    /// The organization read for: the account the quota belongs to.
+    org: String,
     /// `config`, `env`, `cli`, or empty when no token was set.
     source: &'static str,
     why: String,
@@ -276,6 +278,7 @@ pub fn read(caches: &mut Caches, cfg: &Config, shown: bool) -> Data {
     let (token, source) = token(cfg);
     data.source = source;
     let org = org(cfg);
+    data.org = org.clone();
     if token.is_empty() {
         return data;
     }
@@ -360,24 +363,54 @@ pub fn lanes(data: &Data) -> Vec<Lane> {
     };
     let mut out = Vec::new();
     if let Some(window) = &quota.daily {
-        out.push(lane("daily", window, DAY, data.kept.is_some()));
+        out.push(lane("daily", window, DAY, data));
     }
     if let Some(window) = &quota.weekly {
-        out.push(lane("weekly", window, WEEK, data.kept.is_some()));
+        out.push(lane("weekly", window, WEEK, data));
     }
     out
 }
 
-fn lane(label: &str, window: &DevinWindow, window_secs: f64, kept: bool) -> Lane {
+fn lane(label: &str, window: &DevinWindow, window_secs: f64, data: &Data) -> Lane {
     Lane {
         label: label.into(),
         pct: window.pct,
         window_secs: Some(window_secs),
         reset: window.reset,
-        stale: window.reset.is_some_and(|reset| reset <= now()) || kept,
+        stale: window.reset.is_some_and(|reset| reset <= now()) || data.kept.is_some(),
         projected: false,
         apart: false,
+        pool_key: label.into(),
+        fetched_at: data.read_at,
+        ..Lane::default()
     }
+}
+
+/// Lanes the history keeps and no screen draws (OPS-307): the extra usage
+/// balance, which has no ceiling and no cycle. A balance with no ceiling
+/// states what is left as its `limit`. Devin does not name the unit, so it
+/// is kept as credits rather than given a currency nobody sent.
+pub fn history_lanes(data: &Data) -> Vec<Lane> {
+    let Some(balance) = data.quota.as_ref().and_then(|q| q.balance).filter(|b| b.is_finite()) else {
+        return Vec::new();
+    };
+    vec![Lane {
+        label: "extra usage balance".into(),
+        pct: f64::NAN,
+        stale: data.kept.is_some(),
+        pool_key: "extra_usage_balance".into(),
+        unit: Unit::Credits,
+        role: PoolRole::Balance,
+        limit: Some(balance),
+        fetched_at: data.read_at,
+        ..Lane::default()
+    }]
+}
+
+/// What the history needs from Devin beyond its lanes: the organization
+/// the quota is read for, which is the account here.
+pub fn history_facts(data: &Data) -> crate::history::Facts {
+    crate::history::Facts { account_id: data.org.clone(), plan: None, bank: None, why: data.why.clone() }
 }
 
 pub fn why_no_lane(data: &Data) -> String {

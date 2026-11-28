@@ -95,6 +95,10 @@ struct Quota {
     /// `ts`, or the moment of the fetch. Not when it was read: the tab
     /// judges a reading by its age, and those are different numbers.
     taken: Option<f64>,
+    /// When the billing amounts were fetched, where that is not `taken`:
+    /// a billing answer with no percentage borrows the log's, and `taken`
+    /// is then the log line's. The on-demand spend is still the answer's.
+    billed_at: Option<f64>,
     kind: String,
     start: String,
     end: String,
@@ -136,6 +140,10 @@ pub struct Data {
     /// Why the figure on screen is not the server's, when it is not. Empty
     /// when it is, or when nothing is asking.
     quota_why: String,
+    /// The account the token named when the quota was read, kept with it:
+    /// resolving it again when the history is written could pair this
+    /// quota with an account signed in since.
+    account_id: String,
     /// Where this account stands relative to the unified plan, once both
     /// vendors have been read. Set by `vendors::link_spacexsi`.
     pub spacexsi: Spacexsi,
@@ -276,6 +284,7 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
             pct: val_of(&cfg["creditUsagePercent"]),
             products: products_of(cfg),
             taken: iso_epoch(&text(&d, "ts")),
+            billed_at: None,
             kind: text(period, "type"),
             start,
             end,
@@ -305,7 +314,11 @@ fn newest_quota<'a>(lines: impl Iterator<Item = &'a str>) -> Option<Quota> {
 /// the configured one and the reading in between is the one already had.
 /// The credit window, whether it came from the server, when it was asked
 /// for, and - when it did not - which of the four reasons applies.
-fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, String) {
+///
+/// `raw` is `auth.json` as the caller read it, once: the caller takes the
+/// pass's account id from the same body, so the id the history files the
+/// quota under can never name a different sign-in from the one asked.
+fn quota_now(caches: &mut Caches, cfg: &Config, raw: Option<&str>) -> (Option<Quota>, bool, f64, String) {
     let from_log = || {
         newest_quota(tail_lines(&under_home(LOG), LOG_TAIL).iter().map(String::as_str))
     };
@@ -317,12 +330,11 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
     // recorded. The log used to win outright, and on this machine that
     // put a figure from twenty-seven days back over one from two hours
     // back, with nothing on the row to say which was which.
-    let raw = read_auth();
-    let account = raw.as_deref().and_then(parse_token_account);
+    let account = raw.and_then(parse_token_account);
     let ping = ping_key(account.as_deref());
     let held = last_live_of(caches, account.as_deref());
     let held_at = held.as_ref().and_then(|q| q.taken).unwrap_or(0.0);
-    let key = match token_entry_in(raw.as_deref()).and_then(|e| token_of(&e, now())) {
+    let key = match token_entry_in(raw).and_then(|e| token_of(&e, now())) {
         Ok(k) => k,
         Err(why) => {
             // The widget's own refresh has already been tried after the
@@ -382,6 +394,7 @@ fn quota_now(caches: &mut Caches, cfg: &Config) -> (Option<Quota>, bool, f64, St
                     match from_log() {
                         Some(l) if l.start == q.start && l.end == q.end => {
                             q.pct = l.pct;
+                            q.billed_at = q.taken;
                             q.taken = l.taken;
                         }
                         // No reason recorded here on purpose. The row that
@@ -614,8 +627,13 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
         // no session files is the fresh-install path, and returning here
         // used to skip the only refresh that can keep the ask working.
         refresh_if_token_lapsing(caches, cfg, 0.0);
-        let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg);
+        // Still signed in with no session on disk, so the readings file
+        // under the same id as on any other pass. Left empty, they went to
+        // a profile key that the first session then abandoned.
+        let raw = read_auth();
+        let (quota, quota_live, quota_at, quota_why) = quota_now(caches, cfg, raw.as_deref());
         return Data {
+            account_id: account_of(raw.as_deref()),
             quota,
             quota_live,
             quota_at,
@@ -692,8 +710,14 @@ pub fn read(caches: &mut Caches, cfg: &Config) -> Data {
     if !refreshed {
         refresh_if_token_lapsing(caches, cfg, newest);
     }
-    let quota_read = quota_now(caches, cfg);
+    // One read of auth.json for both: an id taken from one read and a
+    // quota asked with another could name two sign-ins, and the history
+    // would file the second account's figures under the first's key.
+    let raw = read_auth();
+    let account_id = account_of(raw.as_deref());
+    let quota_read = quota_now(caches, cfg, raw.as_deref());
     Data {
+        account_id,
         ok: true,
         history,
         sessions,
@@ -780,6 +804,13 @@ fn parse_token_account(raw: &str) -> Option<String> {
 /// about it between polls.
 pub fn account_id() -> Option<String> {
     token_account()
+}
+
+/// The account id a pass files its readings under, from a body of
+/// `auth.json` already read; empty when nobody is signed in, which leaves
+/// the history's profile fallback to apply.
+fn account_of(raw: Option<&str>) -> String {
+    raw.and_then(parse_token_account).unwrap_or_default()
 }
 
 fn token_account() -> Option<String> {
@@ -1150,6 +1181,7 @@ fn quota_from(d: &serde_json::Value) -> Option<Quota> {
         },
         products: products_of(cfg),
         taken: Some(now()),
+        billed_at: None,
         kind: text(period, "type"),
         start,
         end,
@@ -1228,6 +1260,13 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             stale,
             projected,
             apart: false,
+            // One key whether or not the plan is linked, so the vendor's
+            // history is one pool across a link; the SpaceXSI copy is
+            // renamed to the shared weekly pool where it is written
+            // (`Observation::for_spacexsi`).
+            pool_key: "credits".into(),
+            fetched_at: q.taken.unwrap_or(0.0),
+            ..Lane::default()
         });
     }
     // The allowance that costs money, on the same window as the credits
@@ -1235,18 +1274,43 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
     // cap: a percentage of an unnamed ceiling is not a number anyone can
     // act on, and this one is dollars.
     if let Some((pct, cap)) = on_demand_lane(q) {
+        let billed = q.billed_at.or(q.taken);
         out.push(Lane {
             label: format!("on-demand{}", cap_tag(cap)),
             pct,
             window_secs,
             reset,
-            // The same reading, so the same age.
-            stale,
+            // The billing answer's age: the percentage beside it may be a
+            // log line's.
+            stale: reading_is_old(billed),
             projected,
             apart: false,
+            pool_key: "on_demand".into(),
+            unit: Unit::Money { currency: "USD".into(), exponent: 2 },
+            role: PoolRole::Overage,
+            used: Some(q.on_demand_used.unwrap_or(0.0)),
+            limit: Some(cap),
+            fetched_at: billed.unwrap_or(0.0),
         });
     }
     out
+}
+
+/// Whether the quota on screen is the server's answer rather than a figure
+/// the log recorded - which the history keeps as `cached`.
+pub fn quota_is_live(d: &Data) -> bool {
+    d.quota_live
+}
+
+/// What the history needs from Grok beyond its lanes: the account the token
+/// names, the tier, and why the figure is not the server's.
+pub fn history_facts(d: &Data) -> crate::history::Facts {
+    let plan = d
+        .quota
+        .as_ref()
+        .filter(|q| !q.tier.is_empty())
+        .and_then(|q| Some(crate::history::PlanReading { at: q.taken.filter(|t| *t > 0.0)?, plan: q.tier.clone() }));
+    crate::history::Facts { account_id: d.account_id.clone(), plan, bank: None, why: d.quota_why.clone() }
 }
 
 /// True when nothing is asking the server on the reader's behalf, so the
@@ -1802,6 +1866,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_history_pairs_a_quota_with_the_account_read_beside_it() {
+        // CodeRabbit's case: the auth file changing after the poll handed
+        // the history this quota under the new account's id. The id is the
+        // one kept with the quota, never read again.
+        let d = Data {
+            account_id: "user-at-poll".into(),
+            ..Data::own_plan_fixture()
+        };
+        assert_eq!(history_facts(&d).account_id, "user-at-poll");
+    }
+
+    #[test]
     fn a_session_read_as_it_grows_matches_one_read_whole() {
         let mut lines = Vec::new();
         for i in 0..40u64 {
@@ -2110,6 +2186,7 @@ mod tests {
             pct: Some(80.0),
             products: Vec::new(),
             taken: Some(now() - (GROK_FRESH_FOR + 60.0)),
+            billed_at: None,
             kind: "USAGE_PERIOD_TYPE_WEEKLY".into(),
             start: stamp(start),
             end: stamp(end),
@@ -2173,6 +2250,23 @@ mod tests {
         // And the tab agrees with it, figures and all.
         let rows = grok_tab(&d, 90, &palette()).join(" ");
         assert!(rows.contains("on-demand $3 of $25"), "{}", rows);
+    }
+
+    #[test]
+    fn a_percentage_borrowed_from_the_log_leaves_the_billing_spend_its_own_time() {
+        // CodeRabbit's case: the billing answer carried on-demand spend and
+        // no percentage, and a same-window log line with no `ts` supplied
+        // the percentage. The on-demand spend took the log's missing time,
+        // went to the history dated nought, and the store skipped it.
+        let mut q = newest_quota([LOG_LINE].into_iter()).expect("a reading");
+        q.taken = None;
+        q.billed_at = Some(1_000_000.0);
+        let d = Data { ok: true, quota: Some(q), ..Default::default() };
+        let got = lanes(&d);
+        let paid = got.iter().find(|l| l.pool_key == "on_demand").expect("an on-demand lane");
+        assert_eq!(paid.fetched_at, 1_000_000.0);
+        let credits = got.iter().find(|l| l.pool_key == "credits").expect("a credits lane");
+        assert_eq!(credits.fetched_at, 0.0, "the log's percentage keeps the log's time");
     }
 
     #[test]
@@ -2470,6 +2564,10 @@ mod tests {
         );
         assert_eq!(parse_token_account("{}"), None);
         assert_eq!(parse_token_account(r#"{"other":{"no":"key"}}"#), None);
+        // The id a pass files under comes from the body it asked with, and
+        // nobody signed in leaves it empty for the profile fallback.
+        assert_eq!(account_of(Some(r#"{"issuer|acct-a":{"key":"k"}}"#)), "issuer|acct-a");
+        assert_eq!(account_of(None), "");
     }
 
     #[test]
@@ -2608,6 +2706,7 @@ mod tests {
             quota_at: 0.0,
             quota_every: 0.0,
             quota_why: String::new(),
+            account_id: String::new(),
             spacexsi: Spacexsi::No,
         };
         for w in [40usize, 80, 200] {
@@ -2873,6 +2972,19 @@ mod tests {
         let own = grok_tab(&unified_grok(Spacexsi::No), 120, &palette())
             .iter().map(|r| strip(r)).collect::<Vec<_>>().join("\n");
         assert!(own.contains("WEEKLY QUOTA") && !own.contains("SpaceXSI"), "{own}");
+    }
+
+    #[test]
+    fn the_credits_pool_keeps_one_key_whether_or_not_the_plan_is_linked() {
+        // Its history is one pool across a link or an unlink; the SpaceXSI
+        // copy is the store's to name (`Observation::for_spacexsi`).
+        let key = |place: Spacexsi| {
+            let mut d = unified_grok(place);
+            d.spacexsi = place;
+            lanes(&d).first().map(|l| l.pool_key.clone())
+        };
+        assert_eq!(key(Spacexsi::Shared).as_deref(), Some("credits"));
+        assert_eq!(key(Spacexsi::No).as_deref(), Some("credits"));
     }
 
     #[test]

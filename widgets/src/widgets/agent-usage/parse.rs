@@ -1604,6 +1604,215 @@ pub fn format_balance(n: f64) -> String {
     }
 }
 
+/// Codex's reset-credit inventory as the history keeps it: every credit the
+/// server listed, spent and expired ones included, and the server's own
+/// count - nothing filtered by this machine's clock, unlike
+/// [`parse_codex_reset_credits`], because the history diffs banks by credit
+/// and judges expiry against the credit's own date (spec §5.6).
+///
+/// `left` is `available_count` where sent, else the credits listed as
+/// `available`. A body with neither is not a bank.
+pub fn parse_codex_bank_raw(text: &str, at: f64) -> Option<crate::history::BankReading> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let obj = body.as_object()?;
+    let reported = match obj.get("available_count") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(whole_count(value)?),
+    };
+    let credits: Option<Vec<crate::history::RawCredit>> = obj.get("credits").and_then(|c| c.as_array()).map(|list| {
+        list.iter()
+            .filter_map(|c| c.as_object())
+            .map(|c| crate::history::RawCredit {
+                id: c.get("id").and_then(|v| v.as_str()).map(str::to_string),
+                status: c.get("status").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                expires_at: c.get("expires_at").and_then(|v| v.as_str()).and_then(iso_epoch),
+            })
+            .collect()
+    });
+    let listed = credits.as_ref().map(|l| l.iter().filter(|c| c.status == "available").count() as u64);
+    let left = reported.or(listed)?;
+    Some(crate::history::BankReading { at, left, credits })
+}
+
+/// Claude's `cedar_ember` block as the history keeps it: one credit per
+/// reset in each grant, `available` when the grant is usable now and not
+/// paused, else `unavailable`, with the grant's id and expiry. The count is
+/// the usable resets the server stated, not filtered by this machine's
+/// clock. `None` when the block is absent or the account is not eligible.
+pub fn parse_claude_bank_raw(text: &str, at: f64) -> Option<crate::history::BankReading> {
+    let body: serde_json::Value = serde_json::from_str(text).ok()?;
+    let block = body.get("cedar_ember")?.as_object()?;
+    if !block.get("eligible")?.as_bool()? {
+        return None;
+    }
+    let mut credits = Vec::new();
+    let mut left = 0u64;
+    for grant in block.get("grants")?.as_array()? {
+        let Some(grant) = grant.as_object() else {
+            continue;
+        };
+        let usable = grant.get("usable_now").and_then(|v| v.as_bool()) == Some(true)
+            && grant.get("paused").and_then(|v| v.as_bool()) != Some(true);
+        // A count that is there and unreadable makes the bank unread, as it
+        // does on the tab: recorded as zero, it was a measured empty bank
+        // standing over a known inventory in the history. A usable grant
+        // with no count at all is unread the same way; an unusable one
+        // without one holds nothing the bank could count.
+        let count = match grant.get("resets_left") {
+            Some(value) => whole_count(value)?,
+            None if usable => return None,
+            None => 0,
+        }
+        .min(MOST_RESETS);
+        let id = grant.get("id").and_then(|v| v.as_str()).map(str::to_string);
+        let expires_at = grant.get("ends_at").and_then(|v| v.as_str()).and_then(iso_epoch);
+        for n in 0..count {
+            credits.push(crate::history::RawCredit {
+                id: id.as_ref().map(|g| format!("{g}#{n}")),
+                status: if usable { "available" } else { "unavailable" }.into(),
+                expires_at,
+            });
+        }
+        if usable {
+            left = left.saturating_add(count).min(MOST_RESETS);
+        }
+    }
+    Some(crate::history::BankReading { at, left, credits: Some(credits) })
+}
+
+/// Why a pane's readings stopped, from the reason it already shows (spec
+/// §5.2): `ok` for none, then `logged_out`, `auth`, `refused`, `network`,
+/// and `error` for anything else. Read from the words because each
+/// provider says it its own way; `error` is the honest fallback.
+pub fn parse_watch_state(why: &str) -> &'static str {
+    let w = why.to_lowercase();
+    let any = |words: &[&str]| words.iter().any(|x| w.contains(x));
+    if w.trim().is_empty() {
+        "ok"
+    } else if any(&["not signed in", "no token", "sign in", "signed out", "logged out", "not logged", "no cookie", "no api key", "no key"]) {
+        "logged_out"
+    } else if any(&["401", "403", "unauthor", "expired", "rejected", "forbidden", "invalid", "lapsed"]) {
+        "auth"
+    } else if any(&["429", "too many", "rate limit", "rate-limit", "refused", "backing off"]) {
+        "refused"
+    } else if any(&["did not answer", "timed out", "timeout", "resolve", "connect", "network", "unreachable", "offline"]) {
+        "network"
+    } else {
+        "error"
+    }
+}
+
+/// The `sub` claim of a JWT, without checking its signature: the account a
+/// token names, which outlives the token. `None` for anything that is not a
+/// readable JWT. Only the claim is returned; the token is never kept.
+pub fn parse_jwt_subject(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64url(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("sub")?.as_str().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+/// Unpadded base64url, as a JWT segment is written. Padding is tolerated.
+fn base64url(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 3 / 4);
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for c in text.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'-' | b'+' => 62,
+            b'_' | b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod history_parse_tests {
+    use super::*;
+
+    #[test]
+    fn the_codex_bank_keeps_spent_and_expired_credits_and_the_servers_count() {
+        let body = r#"{"available_count":1,"credits":[
+            {"id":"a","status":"available","expires_at":"2020-01-01T00:00:00Z"},
+            {"id":"b","status":"spent","expires_at":"2099-01-01T00:00:00Z"}]}"#;
+        let b = parse_codex_bank_raw(body, 10.0).unwrap();
+        // The first credit has expired by any clock today, and is still kept.
+        assert_eq!(b.left, 1);
+        let c = b.credits.unwrap();
+        assert_eq!(c.len(), 2);
+        assert_eq!(c[0].id.as_deref(), Some("a"));
+        assert_eq!(c[1].status, "spent");
+        // A count with no list.
+        let b = parse_codex_bank_raw(r#"{"available_count":3}"#, 10.0).unwrap();
+        assert_eq!((b.left, b.credits), (3, None));
+        // A list with no count counts what is available.
+        let b = parse_codex_bank_raw(r#"{"credits":[{"status":"available"},{"status":"spent"}]}"#, 10.0).unwrap();
+        assert_eq!(b.left, 1);
+        assert!(parse_codex_bank_raw("{}", 10.0).is_none());
+        assert!(parse_codex_bank_raw("not json", 10.0).is_none());
+    }
+
+    #[test]
+    fn the_claude_bank_is_one_credit_per_reset_with_the_grants_id() {
+        let body = r#"{"cedar_ember":{"eligible":true,"grants":[
+            {"id":"g1","resets_left":2,"usable_now":true,"ends_at":"2099-01-01T00:00:00Z"},
+            {"id":"g2","resets_left":1,"usable_now":false}]}}"#;
+        let b = parse_claude_bank_raw(body, 5.0).unwrap();
+        assert_eq!(b.left, 2);
+        let c = b.credits.unwrap();
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[1].id.as_deref(), Some("g1#1"));
+        assert_eq!(c[2].status, "unavailable");
+        assert!(parse_claude_bank_raw(r#"{"cedar_ember":{"eligible":false}}"#, 5.0).is_none());
+        assert!(parse_claude_bank_raw(r#"{"limits":[]}"#, 5.0).is_none());
+    }
+
+    #[test]
+    fn an_unreadable_reset_count_is_an_unread_bank_not_an_empty_one() {
+        // The tab already reads this grant as unreadable; the history read
+        // it as a measured zero and stored an empty bank.
+        let text = r#"{"cedar_ember":{"eligible":true,"grants":[{"resets_left":"2","usable_now":true}]}}"#;
+        assert!(parse_claude_bank_raw(text, 5.0).is_none());
+        let text = r#"{"cedar_ember":{"eligible":true,"grants":[{"usable_now":true}]}}"#;
+        assert!(parse_claude_bank_raw(text, 5.0).is_none());
+        // A stated zero is a reading, and still the empty bank it says.
+        let text = r#"{"cedar_ember":{"eligible":true,"grants":[{"resets_left":0,"usable_now":true}]}}"#;
+        let b = parse_claude_bank_raw(text, 5.0).unwrap();
+        assert_eq!((b.left, b.credits.map(|c| c.len())), (0, Some(0)));
+    }
+
+    #[test]
+    fn a_watch_state_is_read_from_the_panes_own_reason() {
+        assert_eq!(parse_watch_state(""), "ok");
+        assert_eq!(parse_watch_state("no token - Claude Code has not signed in here"), "logged_out");
+        assert_eq!(parse_watch_state("HTTP 401 Unauthorized"), "auth");
+        assert_eq!(parse_watch_state("too many requests"), "refused");
+        assert_eq!(parse_watch_state("ChatGPT's usage endpoint did not answer"), "network");
+        assert_eq!(parse_watch_state("the server said something odd"), "error");
+    }
+
+    #[test]
+    fn a_jwt_names_its_subject() {
+        // {"alg":"none"} . {"sub":"auth0|user_1","exp":1} . signature
+        let token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhdXRoMHx1c2VyXzEiLCJleHAiOjF9.c2ln";
+        assert_eq!(parse_jwt_subject(token).as_deref(), Some("auth0|user_1"));
+        assert_eq!(parse_jwt_subject("not-a-jwt"), None);
+        assert_eq!(parse_jwt_subject("a.@@@.c"), None);
+        assert_eq!(parse_jwt_subject(""), None);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
