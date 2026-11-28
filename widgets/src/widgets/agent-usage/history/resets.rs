@@ -293,9 +293,14 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
     // new end before reaching the old one moved the end, and the old end
     // is then no boundary the fold rolled at.
     let mut crossed = false;
+    // The window the open cycle is carrying. A reading that states none
+    // keeps it, and the fold's rollover tolerance is that window's: the
+    // 120 s floor of `tolerance(None)` is a shorter window than a five-hour
+    // pool, and a reading inside the real tolerance was missed here.
+    let mut window: Option<f64> = None;
     for &n in &all {
         if n.source == Source::Cached {
-            let tol = tolerance(n.window_secs);
+            let tol = tolerance(n.window_secs.or(window));
             crossed |= end.is_some_and(|e| fold::rolled_over(e, n, tol, tol));
         }
         if n.source != Source::Cached {
@@ -340,6 +345,9 @@ pub fn judge(input: &DetectInput) -> Vec<Judged> {
         }
         if n.source != Source::Cached {
             end_at_prev = end;
+        }
+        if n.window_secs.is_some() {
+            window = n.window_secs;
         }
     }
 
@@ -1278,6 +1286,31 @@ mod tests {
         let i = input(&samples, &[], &[]);
         assert_ne!(verdicts(&i), vec![Verdict::Rollover], "{:#?}", judge(&i));
         assert_eq!(detect(&i).len(), 1, "{:#?}", judge(&i));
+    }
+
+    #[test]
+    fn a_cached_reading_with_no_window_uses_the_cycle_window_it_inherited() {
+        // Five-hour tolerance is 180 s. The cached reading 150 s before E
+        // states the next reset and no window of its own. Checked at
+        // `tolerance(None)` (120 s) it does not count as having crossed, so
+        // the live fall restarts a cycle the fold already opened at E, and
+        // that cycle closes where it started.
+        let e = A + W5;
+        let mut cached = s(e - 150.0, 2.0, Some(e + W5), None);
+        cached.source = Source::Cached;
+        let samples = vec![
+            s(e - 480.0, 60.0, Some(e), Some(W5)),
+            cached,
+            s(e + 60.0, 0.0, Some(e + W5), Some(W5)),
+        ];
+        let i = input(&samples, &[], &[]);
+        assert_eq!(verdicts(&i), vec![Verdict::Rollover], "{:#?}", judge(&i));
+        let resets = detect(&i);
+        assert!(resets.is_empty(), "{resets:#?}");
+        let out = fold_with(&samples, &resets);
+        assert_eq!(out.cycles[0].end_reason, Some(EndReason::Scheduled));
+        assert_eq!(out.cycles[0].closed_at, Some(e));
+        assert!(out.cycles.iter().all(|c| c.closed_at.is_none_or(|at| at > c.starts_at)));
     }
 
     #[test]
