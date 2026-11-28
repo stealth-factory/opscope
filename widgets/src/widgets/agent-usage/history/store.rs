@@ -693,7 +693,7 @@ impl History {
                         // A held-back reading under a pool the merge deleted
                         // must not be bridged into a pool given its id later.
                         for gone in merge_alone_into_shared(&tx, "grok", &key, sk, now, &mut refold, &mut banks_changed)? {
-                            seen.remove(&gone);
+                            seen.retain(|(id, _), _| *id != gone);
                         }
                     }
                     (Some(Spacexsi::Alone | Spacexsi::Separate), _) => {
@@ -1440,6 +1440,11 @@ fn write_lanes(
     watch_gap: f64,
     refold: &mut Vec<(i64, f64)>,
 ) -> Result<(), String> {
+    // Whose the pools are, by name: what a held reading is kept under
+    // beside the pool's id, which SQLite may give a pool made later.
+    let owner: String = tx
+        .query_row("SELECT provider || char(0) || account_key FROM account WHERE id = ?1", [account], |r| r.get(0))
+        .map_err(sql)?;
     for lane in lanes {
         // A projected window's figure belongs to a window that has closed
         // (§4); a lane with no fetch time or no key cannot be placed.
@@ -1447,6 +1452,7 @@ fn write_lanes(
             continue;
         }
         let pool = upsert_pool(tx, account, lane, lane.fetched_at)?;
+        let held = (pool, format!("{owner}\u{0}{}", lane.pool_key));
         let sample = Sample {
             at: lane.fetched_at,
             pct: lane.pct.is_finite().then_some(lane.pct),
@@ -1460,12 +1466,13 @@ fn write_lanes(
         };
         let (before, after) = neighbours(tx, pool, sample.at)?;
         if super::should_write(before.as_ref(), after.as_ref(), &sample) {
-            if let Some(r) = bridge(seen.get(&pool), before.as_ref(), after.as_ref(), &sample, watch_gap) {
+            if let Some(r) = bridge(seen.get(&held), before.as_ref(), after.as_ref(), &sample, watch_gap) {
                 if insert_sample(tx, pool, &r)? {
                     refold.push((pool, r.at));
                 }
             }
-            seen.remove(&pool);
+            // Anything held under the id, this pool's or one it was before.
+            seen.retain(|(id, _), _| *id != pool);
             if insert_sample(tx, pool, &sample)? {
                 refold.push((pool, sample.at));
             }
@@ -1473,7 +1480,7 @@ fn write_lanes(
             // Held back as unchanged: remembered, in case the next change
             // needs it to show the pane was watching.
             if sample.source == Source::Live && sample.at > b.at && !super::changed(b, &sample) {
-                let kept = seen.entry(pool).or_default();
+                let kept = seen.entry(held).or_default();
                 kept.retain(|r| sample.at - r.at <= watch_gap);
                 if kept.len() >= SEEN_MOST {
                     kept.remove(0);
@@ -1486,8 +1493,11 @@ fn write_lanes(
 }
 
 /// Per pool, the live readings this pane held back as unchanged since the
-/// last one written, newest last.
-pub(super) type Seen = HashMap<i64, Vec<Sample>>;
+/// last one written, newest last. Keyed by the pool's id and by whose pool
+/// it is (provider, account key and pool key): a pool another pane deleted
+/// can have its id given to a pool of someone else's, and a reading held
+/// for the one must never be bridged into the other (review on OPS-309).
+pub(super) type Seen = HashMap<(i64, String), Vec<Sample>>;
 
 /// At most this many held-back readings are remembered per pool: enough
 /// for a watch gap's worth of polls, whatever the poll.
@@ -4325,7 +4335,7 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(h.seen.contains_key(&alone_pool), "the test needs a held-back reading");
+        assert!(h.seen.keys().any(|(id, _)| *id == alone_pool), "the test needs a held-back reading");
         let (c, g) = shared_pair(30.0, 9000.0);
         h.record(&[c, g], &t, 9000.0).unwrap();
         let gone: bool = h
@@ -4333,7 +4343,55 @@ mod tests {
             .query_row("SELECT NOT EXISTS (SELECT 1 FROM pool WHERE id = ?1)", [alone_pool], |r| r.get(0))
             .unwrap();
         assert!(gone, "the merge deletes the alone pool");
-        assert!(!h.seen.contains_key(&alone_pool), "a deleted pool's held-back readings were kept");
+        assert!(!h.seen.keys().any(|(id, _)| *id == alone_pool), "a deleted pool's held-back readings were kept");
+    }
+
+    #[test]
+    fn a_reading_held_in_one_pane_is_never_bridged_into_a_pool_another_pane_made_under_its_id() {
+        // Review on OPS-309: the merge forgets the held readings of the
+        // pane that ran it, and no other's. A pane holding a Grok reading
+        // under the deleted pool's id bridged it into the pool SQLite gave
+        // that id to next.
+        let p = temp("merge-seen-panes");
+        let mut a = History::open(&p).unwrap();
+        let mut b = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let (mut c, _) = shared_pair(20.0, 5000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        a.record(&[c], &t, 5000.0).unwrap();
+        b.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        b.record(&[grok_alone(10.0, 6000.0)], &t, 6000.0).unwrap();
+        let alone_pool: i64 = b
+            .conn
+            .query_row(
+                "SELECT p.id FROM pool p JOIN account a ON a.id = p.account_id
+                  WHERE a.provider = 'spacexsi' AND a.account_key = ?1 AND p.pool_key = 'weekly_pool'",
+                [grok_alone(0.0, 0.0).account_key()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(b.seen.keys().any(|(id, _)| *id == alone_pool), "the test needs a held-back reading");
+        let (c, g) = shared_pair(30.0, 6100.0);
+        a.record(&[c, g], &t, 6100.0).unwrap();
+        // Pane A makes a pool of another account, which takes the id, and
+        // pane B writes its next reading.
+        let other = |pct: f64, at: f64| {
+            let mut o = obs(vec![lane("weekly", pct, at, 600000.0, WEEK)]);
+            o.provider = "claude".into();
+            o.account_id = "someone".into();
+            o
+        };
+        a.record(&[other(50.0, 5400.0)], &t, 6200.0).unwrap();
+        let reused: i64 = b
+            .conn
+            .query_row("SELECT p.id FROM pool p JOIN account a ON a.id = p.account_id WHERE a.provider = 'claude'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(reused, alone_pool, "the test needs the id given again");
+        b.record(&[other(60.0, 6500.0)], &t, 6500.0).unwrap();
+        let at: Vec<f64> = b.samples("claude", &other(0.0, 0.0).account_key(), "weekly").unwrap().iter().map(|s| s.at).collect();
+        assert_eq!(at, vec![5400.0, 6500.0], "another pool's held reading was bridged in");
     }
 
     #[test]
