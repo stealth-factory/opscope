@@ -891,11 +891,32 @@ fn when_text(at: f64) -> String {
 
 /// `Tue 18 Nov 14:00–16:10`, the day said once when both ends share it.
 fn when_range(a: f64, b: f64) -> String {
+    when_range_in(a, b, local(a), local(b))
+}
+
+/// [`when_range`] with the two ends' local times given. Where the clock
+/// was set back between them (a repeated hour), the labels can match while
+/// the instants differ by an hour, so both ends keep their offsets.
+fn when_range_in<Tz: chrono::TimeZone>(
+    a: f64,
+    b: f64,
+    x: Option<chrono::DateTime<Tz>>,
+    y: Option<chrono::DateTime<Tz>>,
+) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Offset;
+    if let (Some(x), Some(y)) = (&x, &y) {
+        if x.offset().fix() != y.offset().fix() {
+            return format!("{} {}–{} {}", when_text(a), x.format("%:z"), when_text(b), y.format("%:z"));
+        }
+    }
     let (from, to) = (when_text(a), when_text(b));
     if from == to {
         return from;
     }
-    match (local(a), local(b)) {
+    match (x, y) {
         (Some(x), Some(y)) if x.date_naive() == y.date_naive() => format!("{from}–{}", y.format("%H:%M")),
         _ => format!("{from}–{to}"),
     }
@@ -1290,6 +1311,23 @@ mod tests {
         let across = when_range(lo, lo + DAY);
         assert_eq!(across.matches(':').count(), 2);
         assert!(across.len() > same.len(), "{across} vs {same}");
+    }
+
+    #[test]
+    fn a_range_across_a_repeated_hour_keeps_both_ends_and_their_offsets() {
+        // CodeRabbit on #690: 01:15 -04:00 to 01:15 -05:00 is an hour, and
+        // comparing labels without the offset drew it as one instant.
+        use chrono::TimeZone;
+        let (a, b) = (T0, T0 + H);
+        let x = chrono::FixedOffset::west_opt(4 * 3600).unwrap().timestamp_opt(a as i64, 0).unwrap();
+        let y = chrono::FixedOffset::west_opt(5 * 3600).unwrap().timestamp_opt(b as i64, 0).unwrap();
+        let text = when_range_in(a, b, Some(x), Some(y));
+        assert!(text.contains("-04:00") && text.contains("-05:00"), "{text}");
+        assert!(text.contains('–'), "both ends are shown: {text}");
+        // One offset throughout keeps the short form.
+        let z = chrono::FixedOffset::west_opt(4 * 3600).unwrap();
+        let plain = when_range_in(a, b, Some(z.timestamp_opt(a as i64, 0).unwrap()), Some(z.timestamp_opt(b as i64, 0).unwrap()));
+        assert!(!plain.contains(":00 -"), "{plain}");
     }
 
     #[test]
