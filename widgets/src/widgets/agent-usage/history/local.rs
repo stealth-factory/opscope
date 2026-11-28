@@ -386,9 +386,13 @@ enum Cut {
 /// point it began at. Read from the top, they carry as in any whole read,
 /// for no more bytes than a scan of the headers above the bracket took.
 fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String, f64>) -> Result<(), Cut> {
-    let Ok(file) = std::fs::File::open(path) else {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
         // Gone between the listing and now: nothing in it to count.
-        return Ok(());
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // There but unreadable (permissions, a directory, an I/O fault):
+        // its turns are unknown, so the bracket is not whole.
+        Err(_) => return Err(Cut::Failed),
     };
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let (lo, hi) = (key.at_lo(), key.at_hi());
@@ -1211,6 +1215,34 @@ mod tests {
         let mut out = HashMap::new();
         let got = file_turns(&d.to_string_lossy(), &key, &mut JOB_BYTES.clone(), &mut out);
         assert_eq!(got, Err(Cut::Failed));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_listed_log_that_cannot_be_opened_is_not_read_as_gone() {
+        // Codex on #690: an existing log that refused to open (a mode-000
+        // file) was taken for one that had disappeared, so the turns of the
+        // readable logs were cached as the whole bracket. Opening a path
+        // through a file fails the same way without needing permissions.
+        let d = dir("unopenable");
+        let file = d.join("a.jsonl");
+        std::fs::write(&file, "{}\n").unwrap();
+        let blocked = file.join("b.jsonl");
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 3600.0);
+        let mut out = HashMap::new();
+        let got = file_turns(&blocked.to_string_lossy(), &key, &mut JOB_BYTES.clone(), &mut out);
+        assert_eq!(got, Err(Cut::Failed));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_listed_log_that_disappeared_has_nothing_to_count() {
+        let d = dir("vanished");
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 3600.0);
+        let mut out = HashMap::new();
+        let got = file_turns(&d.join("gone.jsonl").to_string_lossy(), &key, &mut JOB_BYTES.clone(), &mut out);
+        assert_eq!(got, Ok(()));
+        assert!(out.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
