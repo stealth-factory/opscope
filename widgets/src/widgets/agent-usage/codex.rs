@@ -406,6 +406,13 @@ impl Lines for RolloutLines {
                     self.session = id;
                 }
                 self.who = creator(payload);
+                // Whose every line after a header is, is known again, even
+                // for a reader restored without the accounts. Nothing from
+                // before it is vouched for: those snapshots stay unread.
+                if !self.accounts_known {
+                    self.limits.clear();
+                    self.accounts_known = true;
+                }
                 return;
             }
             "turn_context" => {
@@ -2242,6 +2249,21 @@ mod tests {
         old.as_object_mut().unwrap().remove("who");
         t.parser = RolloutLines::load(&old, HashMap::new()).unwrap();
         assert!(newest_limits(&files, "acct-A", &tails).is_none());
+        // Review on OPS-309: a header read after that restore says whose
+        // every line after it is, and the reader went on vouching for
+        // nobody for as long as the rollout lived.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let resumed = format!("{}\n{}\n", meta("acct-A"), newer.replace("31.0", "45.0").replace("02:00:00Z", "03:00:00Z"));
+        std::io::Write::write_all(&mut f, resumed.as_bytes()).unwrap();
+        drop(f);
+        assert!(follow(&mut tails, &files[0], || rollout_reader(&files[0])));
+        let a = newest_limits(&files, "acct-A", &tails).expect("A's, after the header");
+        assert_eq!(a.limits["primary"]["used_percent"], 45.0);
+        // What only the unread prefix held stays unvouched for.
+        assert!(newest_limits(&files, "acct-B", &tails).is_none());
+        let kept = tails[&files[0]].parser.meta();
+        assert_eq!(kept["who"], "acct-A");
+        assert_eq!(kept["limits"]["acct-A"]["limits"]["primary"]["used_percent"], 45.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
