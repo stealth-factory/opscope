@@ -113,6 +113,29 @@ pub struct Tail<P> {
 /// How much of a log's start is kept to recognise it by.
 const HEAD: usize = 1024;
 
+impl<P> Tail<P> {
+    /// The lines `path` holds past what this reader has consumed, when it
+    /// is still the file that was read and no more than `most` bytes were
+    /// appended since; `None` otherwise. With the reader's own state up to
+    /// `offset`, that is the whole file, read without starting over.
+    pub(crate) fn appended(&self, path: &str, most: u64) -> Option<Vec<String>> {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let f = std::fs::File::open(path).ok()?;
+        let meta = f.metadata().ok()?;
+        let size = meta.size();
+        if (meta.dev(), meta.ino()) != self.file || size < self.offset || size - self.offset > most {
+            return None;
+        }
+        let mut head = vec![0u8; self.head_len];
+        if f.read_exact_at(&mut head, 0).is_err() || fnv(&head) != self.head_hash {
+            return None;
+        }
+        let mut rest = vec![0u8; (size - self.offset) as usize];
+        f.read_exact_at(&mut rest, self.offset).ok()?;
+        Some(String::from_utf8_lossy(&rest).split('\n').map(String::from).collect())
+    }
+}
+
 /// FNV-1a, 64 bits. Fixed by definition, unlike the standard library's
 /// hasher, so a hash written by one build still means the same to the next.
 fn fnv(bytes: &[u8]) -> u64 {
