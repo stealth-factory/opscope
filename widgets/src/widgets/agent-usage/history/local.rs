@@ -36,9 +36,10 @@
 //! names the account, as the backfill does, so another account's turns
 //! never land in this one's bracket.
 //!
-//! **Bounded reads.** A bracket is read once and cached for the pane's
-//! life: a reading taken at `at_hi` closed it, so no later write can add a
-//! turn inside it. Only logs written to since `at_lo` are opened; in one
+//! **Bounded reads.** A bracket is read once and cached under its agent,
+//! account and span, while a tab asks for it and for [`EVICT_AFTER`] past
+//! the last pass that did: a reading taken at `at_hi` closed it, so no
+//! later write can add a turn inside it. Only logs written to since `at_lo` are opened; in one
 //! over [`WHOLE_BELOW`], the start of the bracket is found by a binary
 //! search on the lines' own timestamps, and the read stops at the first
 //! line past the bracket. A Codex rollout's lines before that point are
@@ -55,7 +56,7 @@
 //! read that ran past [`JOB_BYTES`], or a listing cut short, draws nothing
 //! either, rather than a count that might be partial.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
 use std::sync::mpsc;
 
@@ -81,6 +82,9 @@ const MAX_LINE: usize = 8 << 20;
 /// The most one job reads across every log. Past it the job's brackets are
 /// left unsaid rather than given a count that may be short.
 const JOB_BYTES: u64 = 512 << 20;
+/// How long a read bracket no tab asked for is kept. A pass that misses a
+/// tab, or one of its log directories, does not cost the reads again.
+const EVICT_AFTER: f64 = 600.0;
 
 /// The agent whose local logs answer for a provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -296,12 +300,15 @@ fn seek_before(f: &std::fs::File, size: u64, target: f64, spent: &mut u64) -> u6
     lo
 }
 
-/// One job: an agent, the logs that are its account's, and the brackets.
+/// One bracket of one account's agent: what a read is cached under. The
+/// directories it is read from are not part of it: a closed bracket's
+/// answer does not change, and a pass that misses a directory must not
+/// throw the answer away.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key {
     pub agent: Agent,
-    /// The directories holding the account's logs, sorted.
-    pub dirs: Vec<String>,
+    /// The history's key for the account.
+    pub account: String,
     /// The account the Codex sessions must name; empty for Claude.
     pub account_id: String,
     lo: u64,
@@ -309,8 +316,8 @@ pub struct Key {
 }
 
 impl Key {
-    pub fn new(agent: Agent, dirs: Vec<String>, account_id: String, at_lo: f64, at_hi: f64) -> Key {
-        Key { agent, dirs, account_id, lo: at_lo.to_bits(), hi: at_hi.to_bits() }
+    pub fn new(agent: Agent, account: String, account_id: String, at_lo: f64, at_hi: f64) -> Key {
+        Key { agent, account, account_id, lo: at_lo.to_bits(), hi: at_hi.to_bits() }
     }
     fn at_lo(&self) -> f64 {
         f64::from_bits(self.lo)
@@ -443,13 +450,13 @@ fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String,
     true
 }
 
-/// Read one bracket from this machine's logs.
-pub fn read_bracket(key: &Key, now: f64, budget: &mut u64) -> Local {
+/// Read one bracket from this machine's logs under `dirs`.
+pub fn read_bracket(key: &Key, dirs: &[String], now: f64, budget: &mut u64) -> Local {
     if key.agent == Agent::Codex && key.account_id.is_empty() {
         return Local::Nothing;
     }
     let mut turns: HashMap<String, f64> = HashMap::new();
-    for dir in &key.dirs {
+    for dir in dirs {
         // Only logs written to since the bracket began can hold a turn in it.
         let (listed, complete) = crate::shared::list_logs(dir, ".jsonl", Some(now - key.at_lo() + SLACK), now);
         if !complete {
@@ -465,18 +472,29 @@ pub fn read_bracket(key: &Key, now: f64, budget: &mut u64) -> Local {
     activity(key.agent, &at, key.at_lo(), key.at_hi()).map_or(Local::Nothing, Local::Found)
 }
 
-type Outcome = Result<Vec<(Key, Local)>, String>;
+/// A bracket to read, and the directories to read it from.
+type Job = (Key, Vec<String>);
 
-fn start(keys: Vec<Key>, now: f64) -> mpsc::Receiver<Outcome> {
+type Outcome = Result<Vec<(Job, Local)>, String>;
+
+/// One bracket read: what was found, from which directories, and when a
+/// tab last asked for it.
+struct Read {
+    local: Local,
+    dirs: Vec<String>,
+    used: f64,
+}
+
+fn start(keys: Vec<Job>, now: f64) -> mpsc::Receiver<Outcome> {
     let (tx, rx) = mpsc::channel();
     let fallback = tx.clone();
     let spawned = std::thread::Builder::new().name("local-turns".into()).spawn(move || {
         let read = std::panic::catch_unwind(|| {
             let mut budget = JOB_BYTES;
             keys.into_iter()
-                .map(|k| {
-                    let got = read_bracket(&k, now, &mut budget);
-                    (k, got)
+                .map(|(k, dirs)| {
+                    let got = read_bracket(&k, &dirs, now, &mut budget);
+                    ((k, dirs), got)
                 })
                 .collect::<Vec<_>>()
         });
@@ -495,7 +513,7 @@ fn start(keys: Vec<Key>, now: f64) -> mpsc::Receiver<Outcome> {
 /// what is known of them, and reads the rest on a thread.
 #[derive(Default)]
 pub struct Reader {
-    cache: HashMap<Key, Local>,
+    cache: HashMap<Key, Read>,
     job: Option<mpsc::Receiver<Outcome>>,
     /// Why the reading thread stopped. Not started again in this pane: a
     /// reader that panicked would panic again.
@@ -508,7 +526,9 @@ impl Reader {
     pub fn tick(&mut self, h: &History, charts: &mut HashMap<String, TabHistory>, obs: &[Observation], now: f64) {
         if let Some(rx) = self.job.take() {
             match rx.try_recv() {
-                Ok(Ok(got)) => self.cache.extend(got),
+                Ok(Ok(got)) => self
+                    .cache
+                    .extend(got.into_iter().map(|((k, dirs), local)| (k, Read { local, dirs, used: now }))),
                 Ok(Err(why)) => self.failed = Some(why),
                 Err(mpsc::TryRecvError::Empty) => self.job = Some(rx),
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -516,8 +536,7 @@ impl Reader {
                 }
             }
         }
-        let mut wanted: HashSet<Key> = HashSet::new();
-        let mut misses: Vec<Key> = Vec::new();
+        let mut misses: Vec<Job> = Vec::new();
         for (tab, th) in charts.iter_mut() {
             let Some(o) = obs.iter().find(|o| &o.tab == tab && Agent::of(&o.provider).is_some()) else {
                 continue;
@@ -542,21 +561,26 @@ impl Reader {
                         b.local = Local::Failed(why.clone());
                         continue;
                     }
-                    let k = Key::new(agent, dirs.clone(), account_id.clone(), b.at_lo, b.at_hi);
-                    match self.cache.get(&k) {
-                        Some(l) => b.local = l.clone(),
-                        None => {
+                    let k = Key::new(agent, account.clone(), account_id.clone(), b.at_lo, b.at_hi);
+                    match self.cache.get_mut(&k) {
+                        // A pass missing a directory keeps the answer; one
+                        // with a directory the read did not cover reads
+                        // again, rather than show a count that leaves it out.
+                        Some(r) if dirs.iter().all(|d| r.dirs.contains(d)) => {
+                            b.local = r.local.clone();
+                            r.used = now;
+                        }
+                        _ => {
                             b.local = Local::Unread;
-                            if !misses.contains(&k) {
-                                misses.push(k.clone());
+                            if !misses.iter().any(|(m, _)| *m == k) {
+                                misses.push((k, dirs.clone()));
                             }
                         }
                     }
-                    wanted.insert(k);
                 }
             }
         }
-        self.cache.retain(|k, _| wanted.contains(k));
+        self.cache.retain(|_, r| now - r.used <= EVICT_AFTER);
         if self.job.is_none() && self.failed.is_none() && !misses.is_empty() {
             self.job = Some(start(misses, now));
         }
@@ -682,8 +706,9 @@ mod tests {
         }
         std::fs::create_dir_all(d.join("p")).unwrap();
         std::fs::write(d.join("p/s.jsonl"), body).unwrap();
-        let key = Key::new(Agent::ClaudeCode, vec![d.to_string_lossy().into()], String::new(), T, T + 5400.0);
-        let got = read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone());
+        let dirs: Vec<String> = vec![d.to_string_lossy().into()];
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 5400.0);
+        let got = read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone());
         assert_eq!(got, Local::Found(Activity { agent: Agent::ClaudeCode, first: T + 300.0, last: T + 3600.0, turns: 2 }));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -696,12 +721,12 @@ mod tests {
         std::fs::write(d.join("a.jsonl"), mine).unwrap();
         std::fs::write(d.join("b.jsonl"), theirs).unwrap();
         let dirs = vec![d.to_string_lossy().to_string()];
-        let key = Key::new(Agent::Codex, dirs.clone(), "me".into(), T, T + 4000.0);
-        let got = read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone());
+        let key = Key::new(Agent::Codex, "k".into(), "me".into(), T, T + 4000.0);
+        let got = read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone());
         assert_eq!(got, Local::Found(Activity { agent: Agent::Codex, first: T + 60.0, last: T + 120.0, turns: 2 }));
         // No account to tie a rollout to: nothing, never every session.
-        let blind = Key::new(Agent::Codex, dirs, String::new(), T, T + 4000.0);
-        assert_eq!(read_bracket(&blind, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
+        let blind = Key::new(Agent::Codex, "k".into(), String::new(), T, T + 4000.0);
+        assert_eq!(read_bracket(&blind, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -709,8 +734,9 @@ mod tests {
     fn a_bracket_with_no_local_turns_is_nothing_not_zero() {
         let d = dir("none");
         std::fs::write(d.join("s.jsonl"), claude_line("m", T - 9000.0)).unwrap();
-        let key = Key::new(Agent::ClaudeCode, vec![d.to_string_lossy().into()], String::new(), T, T + 5400.0);
-        assert_eq!(read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
+        let dirs: Vec<String> = vec![d.to_string_lossy().into()];
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 5400.0);
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -750,6 +776,79 @@ mod tests {
         assert_eq!(starts, vec![T + 30_000.0, T + 40_000.0, T + 50_000.0]);
         assert!(got.iter().all(|b| b.local == Local::Unread && b.amount == 1.5));
         assert!(h.long_brackets("claude", "k", "weekly").unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// One tab's chart with one long bracket at `T`, nothing read about it.
+    fn one_bracket_chart() -> HashMap<String, TabHistory> {
+        use super::super::chart::{Body, PoolHistory};
+        let pool = PoolHistory {
+            label: "extra".into(),
+            role: super::super::fold::Role::Overage,
+            unit: "money".into(),
+            currency: None,
+            exponent: None,
+            total: 1,
+            since: None,
+            body: Body::Overage { bars: Vec::new(), roll_day: None },
+            brackets: vec![Bracket { at_lo: T, at_hi: T + LONG, amount: 2.0, local: Local::Unread }],
+        };
+        HashMap::from([("claude".to_string(), TabHistory { pools: vec![pool], expired: Vec::new() })])
+    }
+
+    /// Tick until the bracket of [`one_bracket_chart`] is read.
+    fn tick_until_read(r: &mut Reader, h: &History, obs: &[Observation], now: f64) -> Local {
+        for _ in 0..500 {
+            let mut c = one_bracket_chart();
+            r.tick(h, &mut c, obs, now);
+            let got = c["claude"].pools[0].brackets[0].local.clone();
+            if got != Local::Unread {
+                return got;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Local::Unread
+    }
+
+    #[test]
+    fn a_read_bracket_outlives_a_pass_that_misses_one_of_its_logs() {
+        // Review on OPS-309: the cache was keyed on every observation's
+        // log directories, so one pass missing a directory dropped every
+        // bracket read with it and forced the reads again.
+        let (d, h) = store("reader-grace");
+        let logs = d.join("projects");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("s.jsonl"), format!("{}\n", claude_line("a", T + 60.0))).unwrap();
+        let mut o = Observation {
+            provider: "claude".into(),
+            tab: "claude".into(),
+            local_logs: vec![logs.to_string_lossy().into()],
+            ..Observation::default()
+        };
+        let now = opscope_core::now();
+        let mut r = Reader::default();
+        let want = Local::Found(Activity { agent: Agent::ClaudeCode, first: T + 60.0, last: T + 60.0, turns: 1 });
+        assert_eq!(tick_until_read(&mut r, &h, std::slice::from_ref(&o), now), want);
+        // A pass without the directory: the closed bracket keeps its answer.
+        o.local_logs.clear();
+        let mut c = one_bracket_chart();
+        r.tick(&h, &mut c, std::slice::from_ref(&o), now + 60.0);
+        assert_eq!(c["claude"].pools[0].brackets[0].local, want);
+        assert!(r.job.is_none(), "the bracket was read again");
+        // Unused for a while: still kept. Unused past the grace: let go.
+        r.tick(&h, &mut HashMap::new(), &[], now + 60.0 + EVICT_AFTER - 1.0);
+        assert_eq!(r.cache.len(), 1);
+        r.tick(&h, &mut HashMap::new(), &[], now + 61.0 + EVICT_AFTER);
+        assert!(r.cache.is_empty());
+        // A directory the read did not cover is read, never left out.
+        o.local_logs = vec![logs.to_string_lossy().into()];
+        assert_eq!(tick_until_read(&mut r, &h, std::slice::from_ref(&o), now), want);
+        let more = d.join("more");
+        std::fs::create_dir_all(&more).unwrap();
+        std::fs::write(more.join("s.jsonl"), format!("{}\n", claude_line("b", T + 90.0))).unwrap();
+        o.local_logs.push(more.to_string_lossy().into());
+        let both = Local::Found(Activity { agent: Agent::ClaudeCode, first: T + 60.0, last: T + 90.0, turns: 2 });
+        assert_eq!(tick_until_read(&mut r, &h, std::slice::from_ref(&o), now), both);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -831,16 +930,16 @@ mod tests {
         };
         let dirs = vec![d.to_string_lossy().to_string()];
         write("a.jsonl", "me", "someone-else");
-        let key = Key::new(Agent::Codex, dirs.clone(), "me".into(), T, T + 4000.0);
-        assert_eq!(read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
+        let key = Key::new(Agent::Codex, "k".into(), "me".into(), T, T + 4000.0);
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
         // The other way round, the turn is this account's.
         write("a.jsonl", "someone-else", "me");
         assert_eq!(
-            read_bracket(&key, opscope_core::now(), &mut JOB_BYTES.clone()),
+            read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()),
             Local::Found(Activity { agent: Agent::Codex, first: T + 60.0, last: T + 60.0, turns: 1 })
         );
         // A budget too small for the header scan says nothing.
-        assert_eq!(read_bracket(&key, opscope_core::now(), &mut (1 << 20)), Local::Nothing);
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut (1 << 20)), Local::Nothing);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -864,15 +963,16 @@ mod tests {
         body.push_str(&claude_line("after", T + 90_000.0));
         body.push('\n');
         std::fs::write(d.join("s.jsonl"), &body).unwrap();
-        let key = Key::new(Agent::ClaudeCode, vec![d.to_string_lossy().into()], String::new(), T, T + 3600.0);
+        let dirs: Vec<String> = vec![d.to_string_lossy().into()];
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 3600.0);
         let mut budget = JOB_BYTES;
-        let got = read_bracket(&key, opscope_core::now(), &mut budget);
+        let got = read_bracket(&key, &dirs, opscope_core::now(), &mut budget);
         assert_eq!(got, Local::Found(Activity { agent: Agent::ClaudeCode, first: T, last: T + 400.0, turns: 5 }));
         let read = JOB_BYTES - budget;
         assert!(read < (1 << 20), "read {read} bytes of {}", body.len());
         // A budget too small for the bracket says nothing rather than a short count.
         let mut tiny = 10_000;
-        assert_eq!(read_bracket(&key, opscope_core::now(), &mut tiny), Local::Nothing);
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut tiny), Local::Nothing);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
