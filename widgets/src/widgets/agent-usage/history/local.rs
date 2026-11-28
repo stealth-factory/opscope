@@ -284,18 +284,24 @@ fn read_capped<R: BufRead>(
 }
 
 /// The first line timestamp at or after byte `off`, skipping the line `off`
-/// lands inside. Looks at a few dozen lines at most.
-fn time_after(f: &std::fs::File, off: u64, spent: &mut u64) -> Option<f64> {
+/// lands inside. Looks at a few dozen lines at most, and never reads past
+/// `limit` bytes in all (`spent` included): a probe through long pasted or
+/// tool-output lines stops where the job's budget does.
+fn time_after(f: &std::fs::File, off: u64, spent: &mut u64, limit: u64) -> Option<f64> {
     let mut f = f;
     f.seek(SeekFrom::Start(off)).ok()?;
     let mut r = std::io::BufReader::with_capacity(1 << 16, f);
     let mut buf = Vec::new();
     if off > 0 {
-        let (_, took) = read_capped(&mut r, &mut buf, 0, u64::MAX).ok()??;
+        let (_, took) = read_capped(&mut r, &mut buf, 0, limit.saturating_sub(*spent)).ok()??;
         *spent += took;
     }
     for _ in 0..64 {
-        let (over, took) = read_capped(&mut r, &mut buf, 256 << 10, u64::MAX).ok()??;
+        let left = limit.saturating_sub(*spent);
+        if left == 0 {
+            return None;
+        }
+        let (over, took) = read_capped(&mut r, &mut buf, 256 << 10, left).ok()??;
         *spent += took;
         if !over {
             if let Some(t) = parse_line_time(&String::from_utf8_lossy(&buf)) {
@@ -306,17 +312,22 @@ fn time_after(f: &std::fs::File, off: u64, spent: &mut u64) -> Option<f64> {
     None
 }
 
-/// A byte offset at or before the first line stamped `target` or later.
-fn seek_before(f: &std::fs::File, size: u64, target: f64, spent: &mut u64) -> u64 {
+/// A byte offset at or before the first line stamped `target` or later, or
+/// `None` when the search would read past `limit` bytes (`spent` included).
+fn seek_before(f: &std::fs::File, size: u64, target: f64, spent: &mut u64, limit: u64) -> Option<u64> {
     let (mut lo, mut hi) = (0u64, size);
     while hi - lo > 1 << 16 {
         let mid = lo + (hi - lo) / 2;
-        match time_after(f, mid, spent) {
+        let found = time_after(f, mid, spent, limit);
+        if *spent >= limit {
+            return None;
+        }
+        match found {
             Some(t) if t < target => lo = mid,
             _ => hi = mid,
         }
     }
-    lo
+    Some(lo)
 }
 
 /// One bracket of one account's agent: what a read is cached under. The
@@ -401,7 +412,13 @@ fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String,
     let start = if size <= WHOLE_BELOW || key.agent == Agent::Codex {
         0
     } else {
-        seek_before(&file, size, lo - SLACK, &mut spent)
+        match seek_before(&file, size, lo - SLACK, &mut spent, *budget) {
+            Some(at) => at,
+            None => {
+                *budget = 0;
+                return Err(Cut::Budget);
+            }
+        }
     };
     let mut f = &file;
     if f.seek(SeekFrom::Start(start)).is_err() {
@@ -411,7 +428,7 @@ fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String,
     let mut buf = Vec::new();
     if start > 0 {
         // The line `start` lands inside, which is before the bracket.
-        match read_capped(&mut r, &mut buf, 0, u64::MAX) {
+        match read_capped(&mut r, &mut buf, 0, budget.saturating_sub(spent).saturating_add(1)) {
             Ok(Some((_, took))) => spent += took,
             Ok(None) => {}
             Err(_) => return Err(Cut::Failed),
@@ -1159,13 +1176,13 @@ mod tests {
         let path = d.join("a.jsonl");
         std::fs::write(&path, lines.concat()).unwrap();
         let size = (LINE * lines.len()) as u64;
-        let landed = seek_before(&std::fs::File::open(&path).unwrap(), size, T - SLACK, &mut 0);
+        let landed = seek_before(&std::fs::File::open(&path).unwrap(), size, T - SLACK, &mut 0, u64::MAX).unwrap();
         assert!(landed > 0 && landed % LINE as u64 == 0, "landed at {landed}");
         let i = landed as usize / LINE;
         assert!(i < 4094);
         lines[i] = header("me", line_at(i));
         std::fs::write(&path, lines.concat()).unwrap();
-        assert_eq!(seek_before(&std::fs::File::open(&path).unwrap(), size, T - SLACK, &mut 0), landed);
+        assert_eq!(seek_before(&std::fs::File::open(&path).unwrap(), size, T - SLACK, &mut 0, u64::MAX).unwrap(), landed);
         let dirs = vec![d.to_string_lossy().to_string()];
         let key = Key::new(Agent::Codex, "k".into(), "me".into(), T, T + 4000.0);
         assert_eq!(
@@ -1215,6 +1232,37 @@ mod tests {
         let mut out = HashMap::new();
         let got = file_turns(&d.to_string_lossy(), &key, &mut JOB_BYTES.clone(), &mut out);
         assert_eq!(got, Err(Cut::Failed));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_timestamp_search_stops_at_the_job_budget() {
+        // Codex on #690: both reads in the search passed `u64::MAX`, so a
+        // transcript of long pasted lines read far past the job's budget
+        // before the bracket read ever checked it.
+        const LINE: usize = 1 << 20;
+        let d = dir("search-budget");
+        let mut body = String::new();
+        for i in 0..12 {
+            body.push_str(&padded(
+                serde_json::json!({ "timestamp": iso(T - 50_000.0 + 100.0 * i as f64), "type": "assistant" }),
+                LINE,
+            ));
+        }
+        let path = d.join("a.jsonl");
+        std::fs::write(&path, &body).unwrap();
+        let size = body.len() as u64;
+        let budget = 300_000u64;
+        let mut spent = 0u64;
+        let got = seek_before(&std::fs::File::open(&path).unwrap(), size, T, &mut spent, budget);
+        assert_eq!(got, None, "a search that runs out of budget gives no offset");
+        assert!(spent <= budget + 1, "read {spent} bytes on a budget of {budget}");
+        // And the bracket read reports it as cut short, not as a count.
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 3600.0);
+        let mut left = budget;
+        let mut out = HashMap::new();
+        assert_eq!(file_turns(&path.to_string_lossy(), &key, &mut left, &mut out), Err(Cut::Budget));
+        assert!(out.is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 
