@@ -305,8 +305,9 @@ pub struct Summary {
     pub averaged: usize,
     /// Cut short by a restarted reset, left out of the average (§5.7).
     pub cut_short: usize,
-    /// Closed by a plan or limit change before their scheduled end: part
-    /// of a period, so left out of the average as a cut-short one is.
+    /// Closed by a plan, limit or window change before their scheduled
+    /// end: part of a period, so left out of the average as a cut-short
+    /// one is.
     pub ended_early: usize,
     /// Reached 100%, and the median time from the cycle's start to that.
     pub hit: usize,
@@ -342,16 +343,19 @@ fn median(mut v: Vec<f64>) -> Option<f64> {
     Some(if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 })
 }
 
-/// Closed by a plan or limit change before the end it was scheduled for:
-/// a partial period, which is no more comparable with a whole one than a
-/// cycle a restart cut short. One whose scheduled end is unknown is not
-/// called partial, since nothing says it was.
+/// Closed by a plan, limit or window change before the end it was
+/// scheduled for: a partial period, which is no more comparable with a
+/// whole one than a cycle a restart cut short. One whose scheduled end is
+/// unknown is not called partial, since nothing says it was. A change that
+/// lands on the scheduled end ran the full length and stays in the average.
 fn ended_early(c: &Cycle) -> bool {
-    matches!(c.end_reason, Some(EndReason::PlanChanged | EndReason::LimitChanged))
-        && match (c.closed_at, c.ends_at) {
-            (Some(closed), Some(end)) => closed < end - super::fold::tolerance(c.window_secs),
-            _ => false,
-        }
+    matches!(
+        c.end_reason,
+        Some(EndReason::PlanChanged | EndReason::LimitChanged | EndReason::WindowChanged)
+    ) && match (c.closed_at, c.ends_at) {
+        (Some(closed), Some(end)) => closed < end - super::fold::tolerance(c.window_secs),
+        _ => false,
+    }
 }
 
 /// The figures the text lines carry, over `bars` (the cycles shown).
@@ -471,7 +475,7 @@ pub fn summary_lines(s: &Summary) -> Vec<String> {
                 left.push(format!("{} cut short left out", s.cut_short));
             }
             if s.ended_early > 0 {
-                left.push(format!("{} ended early by a plan change left out", s.ended_early));
+                left.push(format!("{} ended early left out", s.ended_early));
             }
             first.push(format!(
                 "avg {}{} of allowance ({})",
@@ -480,7 +484,13 @@ pub fn summary_lines(s: &Summary) -> Vec<String> {
                 left.join("; ")
             ));
         }
-        None => first.push("no full cycle closed yet".into()),
+        None => {
+            let mut note = "no full cycle closed yet".to_string();
+            if s.ended_early > 0 {
+                note.push_str(&format!(" ({} ended early left out)", s.ended_early));
+            }
+            first.push(note);
+        }
     }
     let mut clauses = vec![first.join(" ")];
     if s.hit > 0 {
@@ -961,7 +971,9 @@ pub fn balance_lines(pool: &PoolHistory, months: &[MonthTotal]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::super::chart::{Over, ResetMark};
-    use super::super::fold::{CycleModel, Role, StartSource};
+    use super::super::fold::{
+        fold, CycleModel, FoldInput, Role, Sample, Source, StartSource, Thresholds,
+    };
     use super::*;
 
     const H: f64 = 3600.0;
@@ -1312,11 +1324,72 @@ mod tests {
         assert_eq!((s.averaged, s.ended_early), (8, 1));
         let expect: f64 = [43.0, 100.0, 49.0, 140.0, 55.0, 64.0, 63.0, 73.0].iter().sum::<f64>() / 8.0;
         assert!((s.avg.unwrap().0 - expect).abs() < 1e-9);
-        assert!(summary_lines(&s)[0].contains("(8 closed; 1 cut short left out; 1 ended early by a plan change left out)"));
+        assert!(summary_lines(&s)[0].contains("(8 closed; 1 cut short left out; 1 ended early left out)"));
         // Closed by a plan change on its scheduled end, it ran its length.
         let bars = weekly();
         let refs: Vec<&CycleBar> = bars.iter().collect();
         assert_eq!(summarise(&refs, &[]).ended_early, 0);
+    }
+
+    #[test]
+    fn a_window_change_that_closes_before_the_scheduled_end_is_left_out_of_the_average() {
+        // The fold's own case: a weekly window becomes five hours after
+        // 6,600 seconds, at 40%. That is a partial period. Averaging it
+        // reports 40% over one closed cycle when no full cycle has run.
+        let a = 1_000_000.0;
+        let w5 = 5.0 * H;
+        let samples = vec![
+            sample(a + H, 40.0, Some(a + WEEK), Some(WEEK)),
+            sample(a + 2.0 * H, 10.0, Some(a + 2.0 * H + w5 - 600.0), Some(w5)),
+        ];
+        let cycles = fold(&FoldInput {
+            role: Role::Included,
+            samples: &samples,
+            plans: &[],
+            resets: &[],
+            prev: None,
+            next_ordinal: 1,
+            rolling_seed: None,
+            resume: None,
+            gone_at: None,
+            thresholds: Thresholds::default(),
+        })
+        .cycles;
+        let closed = &cycles[0];
+        assert_eq!(closed.end_reason, Some(EndReason::WindowChanged));
+        assert_eq!(closed.closed_at.unwrap() - closed.starts_at, 6_600.0);
+        assert_eq!(closed.consumed_pct, Some(40.0));
+        let bars: Vec<CycleBar> = cycles.into_iter().map(bar).collect();
+        let refs: Vec<&CycleBar> = bars.iter().collect();
+        let s = summarise(&refs, &[]);
+        assert_eq!((s.averaged, s.ended_early, s.avg), (0, 1, None));
+        let line = &summary_lines(&s)[0];
+        assert!(line.contains("no full cycle closed yet (1 ended early left out)"), "{line}");
+        // The 40% is still the peak of that partial cycle. It is not an average.
+        assert!(!line.contains("avg"), "{line}");
+        assert!(line.contains("40% peak"), "{line}");
+
+        // A window change on the scheduled end ran the full length.
+        let mut full = cycle(1, Some(80.0));
+        full.end_reason = Some(EndReason::WindowChanged);
+        let bars = [bar(full)];
+        let refs: Vec<&CycleBar> = bars.iter().collect();
+        let s = summarise(&refs, &[]);
+        assert_eq!((s.averaged, s.ended_early), (1, 0));
+        assert!((s.avg.unwrap().0 - 80.0).abs() < 1e-9);
+    }
+
+    fn sample(at: f64, pct: f64, reset: Option<f64>, window: Option<f64>) -> Sample {
+        Sample {
+            at,
+            pct: Some(pct),
+            used: None,
+            limit: None,
+            window_secs: window,
+            reset_at: reset,
+            source: Source::Live,
+            spacexsi: None,
+        }
     }
 
     #[test]
