@@ -33,9 +33,9 @@
 //! ## Schema versions
 //!
 //! * **v1** ([`V1`]): every table, spec §3.6.
-//! * **v2** ([`V2`], OPS-309): three nullable columns, nothing else. Raw
+//! * **v2** ([`V2`], OPS-309): four nullable columns, nothing else. Raw
 //!   samples are never rewritten: a v1 file keeps every row as it was, and
-//!   all three read `NULL` on rows written before the migration, where
+//!   all four read `NULL` on rows written before the migration, where
 //!   each reader falls back to the v1 rule. So the derived tables fold the
 //!   same from a migrated file and the migration re-folds nothing.
 //!   - `sample.grant_left REAL`: on a balance sample, what the grant whose
@@ -46,6 +46,12 @@
 //!     (`remaining_cents`). `NULL` is unstated - an old sample, a provider
 //!     that does not say, or a grant among those that did not say - never
 //!     zero. [`overage::balance_moves`] caps a lapse at it.
+//!   - `sample.grant_total REAL`: beside `grant_left`, what those grants
+//!     were granted, from the same source (Perplexity's `amount_cents`).
+//!     A ceiling that fell by more than it lost another grant as well, one
+//!     whose expiry no reading stated, so [`overage::balance_moves`] counts
+//!     up to that grant's amount more as expiry rather than spend. `NULL` is
+//!     unstated, and the cap is then `grant_left`'s alone, as before it.
 //!   - `pool.last_pct REAL`: the percentage of the live answer `last_seen`
 //!     is the time of - set with it, on every live answer, written as a
 //!     sample or held back as unchanged - so the idle check in [`gone_at`]
@@ -243,6 +249,7 @@ CREATE TABLE overage_span (
 /// rows read `NULL` - unstated - and are not rewritten.
 const V2: &str = "
 ALTER TABLE sample ADD COLUMN grant_left REAL;
+ALTER TABLE sample ADD COLUMN grant_total REAL;
 ALTER TABLE pool ADD COLUMN last_pct REAL;
 ALTER TABLE pool ADD COLUMN last_pct_at REAL;
 ";
@@ -1403,7 +1410,7 @@ fn pools_of(tx: &Transaction, account: i64) -> Result<Vec<i64>, String> {
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
-const SAMPLE_COLS: &str = "at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi, grant_left";
+const SAMPLE_COLS: &str = "at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi, grant_left, grant_total";
 
 fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
     Ok(Sample {
@@ -1416,6 +1423,7 @@ fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
         source: Source::from_name(&r.get::<_, String>(6)?),
         spacexsi: r.get(7)?,
         grant_left: r.get(8)?,
+        grant_total: r.get(9)?,
     })
 }
 
@@ -1479,6 +1487,7 @@ fn write_lanes(
             source: if lane.stale { Source::Cached } else { Source::Live },
             spacexsi: spacexsi.map(str::to_string),
             grant_left: lane.grant_left.filter(|g| g.is_finite()),
+            grant_total: lane.grant_total.filter(|g| g.is_finite()),
         };
         let (before, after) = neighbours(tx, pool, sample.at)?;
         if super::should_write(before.as_ref(), after.as_ref(), &sample) {
@@ -1579,7 +1588,7 @@ fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String
     let n = tx
         .execute(
             &format!(
-                "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
             ),
             params![
                 pool,
@@ -1591,7 +1600,8 @@ fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String
                 s.reset_at,
                 s.source.name(),
                 s.spacexsi,
-                s.grant_left
+                s.grant_left,
+                s.grant_total
             ],
         )
         .map_err(sql)?;
@@ -2709,7 +2719,8 @@ mod tests {
         {
             let c = Connection::open(&p).unwrap();
             c.execute_batch(
-                "ALTER TABLE sample DROP COLUMN grant_left; ALTER TABLE pool DROP COLUMN last_pct;
+                "ALTER TABLE sample DROP COLUMN grant_left; ALTER TABLE sample DROP COLUMN grant_total;
+                 ALTER TABLE pool DROP COLUMN last_pct;
                  ALTER TABLE pool DROP COLUMN last_pct_at; PRAGMA user_version = 1;",
             )
             .unwrap();
@@ -2752,6 +2763,7 @@ mod tests {
             .conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM sample WHERE grant_left IS NOT NULL)
+                      + (SELECT COUNT(*) FROM sample WHERE grant_total IS NOT NULL)
                       + (SELECT COUNT(*) FROM pool WHERE last_pct IS NOT NULL)
                       + (SELECT COUNT(*) FROM pool WHERE last_pct_at IS NOT NULL)",
                 [],
@@ -4672,6 +4684,7 @@ mod tests {
                 source: Source::Backfill,
                 spacexsi: None,
                 grant_left: None,
+                grant_total: None,
             },
         }
     }

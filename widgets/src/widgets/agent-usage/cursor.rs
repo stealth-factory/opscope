@@ -785,6 +785,7 @@ fn credits_lane(d: &Data) -> Option<Lane> {
         limit: Some(paid / 100.0),
         fetched_at: d.prepaid_at,
         grant_left: None,
+        grant_total: None,
     })
 }
 
@@ -845,6 +846,7 @@ pub fn history_lanes(d: &Data) -> Vec<Lane> {
         limit: None,
         fetched_at,
         grant_left: None,
+        grant_total: None,
     }]
 }
 
@@ -2163,6 +2165,7 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
                 // that carried it.
                 fetched_at: if from_prepaid && d.prepaid_at > 0.0 { d.prepaid_at } else { d.fetched_at },
                 grant_left: None,
+                grant_total: None,
             });
         }
         // What has been drawn from the prepaid balance, as a share of what
@@ -2225,6 +2228,7 @@ fn fresh_lanes(d: &Data) -> Vec<Lane> {
             limit: extra_cents(&state).map(|(_, l)| l / 100.0),
             fetched_at: d.fetched_at,
             grant_left: None,
+            grant_total: None,
         });
     }
     // Its own window, not the billing cycle's. The summary ranks lanes

@@ -1017,6 +1017,11 @@ pub struct Lane {
     /// spent grant expiring beside spend is not read as its whole amount
     /// gone (`history::overage::balance_moves`). Perplexity fills it.
     pub grant_left: Option<f64>,
+    /// Beside [`Lane::grant_left`]: what those grants were granted, in
+    /// `unit`. A ceiling falling by more than this lost another grant too,
+    /// one whose expiry no reading stated, and its remainder is expiry, not
+    /// spend. `None` when the provider does not say.
+    pub grant_total: Option<f64>,
 }
 
 /// What a lane's amounts are counted in.

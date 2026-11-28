@@ -130,6 +130,9 @@ pub struct Sample {
     /// the provider says ([`crate::shared::Lane::grant_left`]). `None` is
     /// unstated. Schema v2.
     pub grant_left: Option<f64>,
+    /// What that grant was granted ([`crate::shared::Lane::grant_total`]).
+    /// `None` is unstated. Schema v2.
+    pub grant_total: Option<f64>,
 }
 
 /// An account's plan, from the time it was first seen (`plan_sample`).
@@ -1243,6 +1246,7 @@ mod tests {
             source: Source::Live,
             spacexsi: None,
             grant_left: None,
+            grant_total: None,
         }
     }
 

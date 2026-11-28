@@ -488,6 +488,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
                 limit: Some(pool.total),
                 fetched_at: d.credits_at,
                 grant_left: None,
+                grant_total: None,
             });
         }
     }
@@ -502,7 +503,9 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
 /// (`history::overage::balance_moves`). The never-expires marker is no date.
 /// Beside it, `grant_left`: what the grants expiring then still hold, from
 /// their `remaining_cents`, so a partly spent grant that lapses is expiry
-/// only for what it held. `None` when any of them does not say.
+/// only for what it held. `None` when any of them does not say. And
+/// `grant_total`, what they were granted, so a limit that fell by more is
+/// read as another grant lapsing unstated beside them, not as spend.
 pub fn history_lanes(d: &Data) -> Vec<Lane> {
     // The credit lanes as they stood when fetched, never as reparsed now.
     let as_read;
@@ -564,6 +567,12 @@ pub fn history_lanes(d: &Data) -> Vec<Lane> {
         };
         lane.reset = soonest(kind);
         lane.grant_left = left_at(kind, lane.reset);
+        // What those grants were granted: a limit falling by more lost a
+        // grant whose expiry no reading stated as well.
+        lane.grant_total = lane.reset.and_then(|at| {
+            let total: f64 = c.grants.iter().filter(|g| g.kind == kind && g.expires == Some(at)).map(|g| g.amount).sum();
+            lane.grant_left.is_some().then_some(total)
+        });
     }
     out
 }
@@ -2024,6 +2033,26 @@ mod tests {
             a + 30.0 * 86400.0
         );
         assert_eq!(bonus_moves(&[(&unsaid, a), (&after, a + 4.0 * 3600.0)]), (30.0, 100.0));
+    }
+
+    #[test]
+    fn a_second_bonus_lapsing_unstated_in_the_same_bracket_is_expiry_not_spend() {
+        // Review on OPS-309: a 100 bonus holding 20 lapses at a+2h and an
+        // untouched 200 at a+3h, and nothing is spent. No reading states
+        // the second expiry, so the cap at what the first held read the
+        // 200 that lapsed with it as spend.
+        let a = 1_790_000_000.0;
+        let (first, second) = (a + 2.0 * 3600.0, a + 3.0 * 3600.0);
+        let before = format!(
+            r#"{{"total_usage_cents":0,"credit_grants":[
+                {{"type":"promotional","amount_cents":100,"remaining_cents":20,"expires_at_ts":{first}}},
+                {{"type":"promotional","amount_cents":200,"remaining_cents":200,"expires_at_ts":{second}}}]}}"#
+        );
+        let none = r#"{"total_usage_cents":0,"credit_grants":[]}"#;
+        assert_eq!(bonus_moves(&[(&before, a), (none, a + 4.0 * 3600.0)]), (0.0, 220.0));
+        // Spend beside it is still bounded: 30 of the 200 spent first.
+        let spent = before.replace(r#""remaining_cents":200"#, r#""remaining_cents":170"#);
+        assert_eq!(bonus_moves(&[(&before, a), (&spent, a + 600.0), (none, a + 4.0 * 3600.0)]), (30.0, 190.0));
     }
 
     #[test]

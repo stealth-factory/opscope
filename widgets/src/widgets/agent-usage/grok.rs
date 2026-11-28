@@ -1334,6 +1334,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             limit: Some(cap),
             fetched_at: billed.unwrap_or(0.0),
             grant_left: None,
+            grant_total: None,
         });
     }
     out

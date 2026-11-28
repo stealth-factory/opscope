@@ -221,6 +221,7 @@ fn limits_at(limits: &serde_json::Value, at: f64) -> Vec<Replayed> {
                 source: Source::Backfill,
                 spacexsi: None,
                 grant_left: None,
+                grant_total: None,
             },
         });
     };
