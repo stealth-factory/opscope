@@ -275,6 +275,11 @@ pub fn changed(a: &Sample, b: &Sample) -> bool {
         || opt_differs(a.limit, b.limit, 1e-9)
         || opt_differs(a.window_secs, b.window_secs, 1.0)
         || opt_differs(a.reset_at, b.reset_at, fold::tolerance(b.window_secs.or(a.window_secs)))
+        // What a lapsing grant still held, and was granted, is the evidence
+        // that tells its expiry from spend: a reading that brings it without
+        // moving the totals is written, not held until the heartbeat.
+        || opt_differs(a.grant_left, b.grant_left, 1e-9)
+        || opt_differs(a.grant_total, b.grant_total, 1e-9)
 }
 
 /// Whether `new` is written, given the stored samples either side of it
@@ -502,6 +507,18 @@ mod tests {
         assert!(!should_write(Some(&p), None, &s(1400.0, 10.0, Some(20030.0))));
         // One that moved by more than the tolerance is.
         assert!(should_write(Some(&p), None, &s(1400.0, 10.0, Some(20400.0))));
+    }
+
+    #[test]
+    fn a_reading_that_only_brings_grant_evidence_is_a_change() {
+        // CodeRabbit on #690: the totals unchanged, a reading that newly
+        // states what the lapsing grant holds was held until the heartbeat,
+        // and the lapse in between was read as spend.
+        let p = s(1000.0, 10.0, Some(20000.0));
+        let with = |left: Option<f64>, total: Option<f64>| Sample { grant_left: left, grant_total: total, ..s(1400.0, 10.0, Some(20000.0)) };
+        assert!(should_write(Some(&p), None, &with(Some(20.0), None)));
+        assert!(should_write(Some(&p), None, &with(None, Some(100.0))));
+        assert!(!should_write(Some(&p), None, &with(None, None)), "and nothing new is still no change");
     }
 
     #[test]
