@@ -44,13 +44,13 @@
 //! **Bounded reads.** A bracket is read once and cached under its agent,
 //! account and span, while a tab asks for it and for [`EVICT_AFTER`] past
 //! the last pass that did: a reading taken at `at_hi` closed it, so no
-//! later write can add a turn inside it. Only logs written to since `at_lo` are opened; in one
-//! over [`WHOLE_BELOW`], the start of the bracket is found by a binary
-//! search on the lines' own timestamps, and the read stops at the first
-//! line past the bracket. A Codex rollout's lines before that point are
-//! still read, with only its `session_meta` headers parsed: whose the
-//! turns are is the latest header above them, which can sit anywhere in
-//! the file, and that read counts toward the same budget. Lines are read through a fixed buffer and capped
+//! later write can add a turn inside it. Only logs written to since `at_lo` are opened; in a
+//! transcript over [`WHOLE_BELOW`], the start of the bracket is found by a
+//! binary search on the lines' own timestamps. A Codex rollout is always
+//! read from its first line: whose the turns are is the latest header above
+//! them, which can sit anywhere in the file, and whether a `token_count` is
+//! a turn depends on the total before it. Either read stops at the first
+//! line past the bracket. Lines are read through a fixed buffer and capped
 //! at [`MAX_LINE`], so memory follows the buffer, never the file (the rule
 //! OPS-207 and OPS-208 set for the token history). All of it happens on a
 //! thread of its own, one job at a time, so a pass never waits for it.
@@ -58,8 +58,11 @@
 //! **What is never said.** A bracket with no local turns draws nothing,
 //! not "no local turns": Claude Code deletes transcripts after its cleanup
 //! period, and an absent log is indistinguishable from an idle machine. A
-//! read that ran past [`JOB_BYTES`], or a listing cut short, draws nothing
-//! either, rather than a count that might be partial.
+//! read that ran past [`JOB_BYTES`], a listing cut short or a log that
+//! failed part-way draws nothing either, rather than a count that might be
+//! partial. A bracket the budget ran out on only because another in the
+//! same job spent it, or whose listing was cut short, is not kept as that
+//! answer: it is asked for again on a later pass.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Seek, SeekFrom};
@@ -237,11 +240,21 @@ pub fn parse_codex_line(line: &str) -> CodexLine {
 
 /// Read one line into `buf`, keeping at most `cap` bytes. `None` at the end,
 /// `Some(true)` when the line was longer than `cap`; returns the bytes the
-/// line took on disk as well.
-fn read_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> std::io::Result<Option<(bool, u64)>> {
+/// line took on disk as well. Reading stops after `limit` bytes even inside
+/// a line, which is then `over`: a line longer than what is left of the
+/// budget is never read whole to find out.
+fn read_capped<R: BufRead>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+    cap: usize,
+    limit: u64,
+) -> std::io::Result<Option<(bool, u64)>> {
     buf.clear();
     let (mut over, mut any, mut took) = (false, false, 0u64);
     loop {
+        if took >= limit {
+            return Ok(Some((true, took)));
+        }
         let avail = match r.fill_buf() {
             Ok(a) => a,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -251,6 +264,7 @@ fn read_capped<R: BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> std::io:
             return Ok(any.then_some((over, took)));
         }
         any = true;
+        let avail = &avail[..avail.len().min(usize::try_from(limit - took).unwrap_or(usize::MAX))];
         let end = avail.iter().position(|&b| b == b'\n');
         let chunk = &avail[..end.unwrap_or(avail.len())];
         let room = cap.saturating_sub(buf.len());
@@ -277,11 +291,11 @@ fn time_after(f: &std::fs::File, off: u64, spent: &mut u64) -> Option<f64> {
     let mut r = std::io::BufReader::with_capacity(1 << 16, f);
     let mut buf = Vec::new();
     if off > 0 {
-        let (_, took) = read_capped(&mut r, &mut buf, 0).ok()??;
+        let (_, took) = read_capped(&mut r, &mut buf, 0, u64::MAX).ok()??;
         *spent += took;
     }
     for _ in 0..64 {
-        let (over, took) = read_capped(&mut r, &mut buf, 256 << 10).ok()??;
+        let (over, took) = read_capped(&mut r, &mut buf, 256 << 10, u64::MAX).ok()??;
         *spent += took;
         if !over {
             if let Some(t) = parse_line_time(&String::from_utf8_lossy(&buf)) {
@@ -352,64 +366,66 @@ fn codex_header(buf: &[u8], over: bool) -> Option<Option<String>> {
     }
 }
 
+/// Why a log was not read to the end of the bracket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    /// The job's byte budget ran out first.
+    Budget,
+    /// A read failed: what was read before it is not the whole bracket.
+    Failed,
+}
+
 /// The turns one log holds between `lo` and `hi`, keyed for de-duplication,
-/// appended to `out`. `false` when the byte budget ran out first.
-fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String, f64>) -> bool {
+/// appended to `out`. An error when the log was not read to the end of the
+/// bracket, so what is in `out` may be short.
+///
+/// A Codex rollout is always read from its first line. Whose a turn is is
+/// the latest `session_meta` above it, which can sit anywhere in the file,
+/// and whether a `token_count` is a turn at all depends on the total before
+/// it, so a read begun part-way through would have to carry both across the
+/// point it began at. Read from the top, they carry as in any whole read,
+/// for no more bytes than a scan of the headers above the bracket took.
+fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String, f64>) -> Result<(), Cut> {
     let Ok(file) = std::fs::File::open(path) else {
         // Gone between the listing and now: nothing in it to count.
-        return true;
+        return Ok(());
     };
     let size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let (lo, hi) = (key.at_lo(), key.at_hi());
     let mut spent = 0u64;
     let mut session: Option<Option<String>> = None;
-    let start = if size <= WHOLE_BELOW { 0 } else { seek_before(&file, size, lo - SLACK, &mut spent) };
-    if key.agent == Agent::Codex && start > 0 {
-        // Whose the turns after `start` are is the latest `session_meta`
-        // before it, which can sit anywhere above: every line up to `start`
-        // is looked at, but only a header is parsed.
-        let mut f = &file;
-        if f.seek(SeekFrom::Start(0)).is_err() {
-            return true;
-        }
-        let mut r = std::io::BufReader::with_capacity(1 << 16, f);
-        let mut buf = Vec::new();
-        let mut at = 0u64;
-        while at < start {
-            if spent > *budget {
-                *budget = 0;
-                return false;
-            }
-            let Ok(Some((over, took))) = read_capped(&mut r, &mut buf, MAX_LINE) else {
-                break;
-            };
-            spent += took;
-            at += took;
-            if let Some(who) = codex_header(&buf, over) {
-                session = Some(who);
-            }
-        }
-    }
+    let start = if size <= WHOLE_BELOW || key.agent == Agent::Codex {
+        0
+    } else {
+        seek_before(&file, size, lo - SLACK, &mut spent)
+    };
     let mut f = &file;
     if f.seek(SeekFrom::Start(start)).is_err() {
-        return true;
+        return Err(Cut::Failed);
     }
     let mut r = std::io::BufReader::with_capacity(1 << 16, f);
     let mut buf = Vec::new();
     if start > 0 {
-        if let Ok(Some((_, took))) = read_capped(&mut r, &mut buf, 0) {
-            spent += took;
+        // The line `start` lands inside, which is before the bracket.
+        match read_capped(&mut r, &mut buf, 0, u64::MAX) {
+            Ok(Some((_, took))) => spent += took,
+            Ok(None) => {}
+            Err(_) => return Err(Cut::Failed),
         }
     }
     let mut last_total: Option<f64> = None;
     loop {
         if spent > *budget {
             *budget = 0;
-            return false;
+            return Err(Cut::Budget);
         }
-        let (over, took) = match read_capped(&mut r, &mut buf, MAX_LINE) {
+        // One byte past the budget, so a line it cuts short stops the read
+        // above rather than being read whole first.
+        let left = *budget - spent + 1;
+        let (over, took) = match read_capped(&mut r, &mut buf, MAX_LINE, left) {
             Ok(Some(x)) => x,
-            _ => break,
+            Ok(None) => break,
+            Err(_) => return Err(Cut::Failed),
         };
         spent += took;
         if over {
@@ -452,10 +468,13 @@ fn file_turns(path: &str, key: &Key, budget: &mut u64, out: &mut HashMap<String,
         }
     }
     *budget = budget.saturating_sub(spent);
-    true
+    Ok(())
 }
 
-/// Read one bracket from this machine's logs under `dirs`.
+/// Read one bracket from this machine's logs under `dirs`. `Unread` when it
+/// could not be read whole for now (the budget ran out, or a listing was cut
+/// short): not an answer, so it is asked for again rather than kept.
+/// `Nothing` when no turn was found, or a log could not be read.
 pub fn read_bracket(key: &Key, dirs: &[String], now: f64, budget: &mut u64) -> Local {
     if key.agent == Agent::Codex && key.account_id.is_empty() {
         return Local::Nothing;
@@ -465,11 +484,13 @@ pub fn read_bracket(key: &Key, dirs: &[String], now: f64, budget: &mut u64) -> L
         // Only logs written to since the bracket began can hold a turn in it.
         let (listed, complete) = crate::shared::list_logs(dir, ".jsonl", Some(now - key.at_lo() + SLACK), now);
         if !complete {
-            return Local::Nothing;
+            return Local::Unread;
         }
         for l in &listed {
-            if !file_turns(&l.path, key, budget, &mut turns) {
-                return Local::Nothing;
+            match file_turns(&l.path, key, budget, &mut turns) {
+                Ok(()) => {}
+                Err(Cut::Budget) => return Local::Unread,
+                Err(Cut::Failed) => return Local::Nothing,
             }
         }
     }
@@ -490,18 +511,30 @@ struct Read {
     used: f64,
 }
 
+/// Read a job's brackets out of one `budget`. A bracket the budget ran out
+/// on after another had spent some of it is left `Unread`, for a job of its
+/// own; one a whole budget could not cover is `Nothing`, since another job
+/// would only run out on it again.
+fn read_job(keys: Vec<Job>, now: f64, mut budget: u64) -> Vec<(Job, Local)> {
+    let whole = budget;
+    keys.into_iter()
+        .map(|(k, dirs)| {
+            let fresh = budget == whole;
+            let mut got = read_bracket(&k, &dirs, now, &mut budget);
+            if got == Local::Unread && fresh && budget == 0 {
+                got = Local::Nothing;
+            }
+            ((k, dirs), got)
+        })
+        .collect()
+}
+
 fn start(keys: Vec<Job>, now: f64) -> mpsc::Receiver<Outcome> {
     let (tx, rx) = mpsc::channel();
     let fallback = tx.clone();
     let spawned = std::thread::Builder::new().name("local-turns".into()).spawn(move || {
         let read = std::panic::catch_unwind(|| {
-            let mut budget = JOB_BYTES;
-            keys.into_iter()
-                .map(|(k, dirs)| {
-                    let got = read_bracket(&k, &dirs, now, &mut budget);
-                    ((k, dirs), got)
-                })
-                .collect::<Vec<_>>()
+            read_job(keys, now, JOB_BYTES)
         });
         let outcome = read.map_err(|_| {
             opscope_core::take_panic_reason().unwrap_or_else(|| "the local log reader panicked".to_string())
@@ -531,9 +564,13 @@ impl Reader {
     pub fn tick(&mut self, h: &History, charts: &mut HashMap<String, TabHistory>, obs: &[Observation], now: f64) {
         if let Some(rx) = self.job.take() {
             match rx.try_recv() {
-                Ok(Ok(got)) => self
-                    .cache
-                    .extend(got.into_iter().map(|((k, dirs), local)| (k, Read { local, dirs, used: now }))),
+                // A bracket left unread is not an answer: the next pass
+                // asks for it again.
+                Ok(Ok(got)) => self.cache.extend(
+                    got.into_iter()
+                        .filter(|(_, local)| *local != Local::Unread)
+                        .map(|((k, dirs), local)| (k, Read { local, dirs, used: now })),
+                ),
                 Ok(Err(why)) => self.failed = Some(why),
                 Err(mpsc::TryRecvError::Empty) => self.job = Some(rx),
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -1024,8 +1061,157 @@ mod tests {
             read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()),
             Local::Found(Activity { agent: Agent::Codex, first: T + 60.0, last: T + 60.0, turns: 1 })
         );
-        // A budget too small for the header scan says nothing.
-        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut (1 << 20)), Local::Nothing);
+        // A budget too small for the rollout leaves it unread, and a job
+        // whose whole budget that is says nothing.
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut (1 << 20)), Local::Unread);
+        assert_eq!(read_job(vec![(key.clone(), dirs.clone())], opscope_core::now(), 1 << 20)[0].1, Local::Nothing);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `v` as one line exactly `len` bytes long with its newline.
+    fn padded(mut v: serde_json::Value, len: usize) -> String {
+        v["pad"] = serde_json::Value::String(String::new());
+        let bare = v.to_string().len();
+        v["pad"] = serde_json::Value::String("x".repeat(len - 1 - bare));
+        let line = format!("{v}\n");
+        assert_eq!(line.len(), len);
+        line
+    }
+
+    #[test]
+    fn a_session_header_at_the_point_the_search_lands_on_is_read() {
+        // Review on OPS-309: the search can land on the first byte of a
+        // `session_meta`. The header scan stopped short of it and the
+        // bracket read skipped it as the line it landed inside, so the
+        // turns under it went to the account of the header before.
+        const LINE: usize = 4096;
+        let d = dir("codex-aligned");
+        let line_at = |i: usize| T - 50_000.0 + 10.0 * i as f64;
+        let header = |who: &str, at: f64| {
+            padded(serde_json::json!({ "timestamp": iso(at), "type": "session_meta", "payload": { "creator_account_id": who } }), LINE)
+        };
+        let turn = |at: f64, total: f64| {
+            padded(
+                serde_json::json!({
+                    "timestamp": iso(at),
+                    "type": "event_msg",
+                    "payload": { "type": "token_count", "info": { "total_token_usage": { "total_tokens": total } } },
+                }),
+                LINE,
+            )
+        };
+        // 4096 lines of 4096 bytes: every point the search halves to is
+        // the first byte of a line.
+        let mut lines: Vec<String> = vec![header("someone-else", line_at(0))];
+        for i in 1..4094 {
+            lines.push(padded(serde_json::json!({ "timestamp": iso(line_at(i)), "type": "response_item" }), LINE));
+        }
+        lines.push(turn(T + 60.0, 10.0));
+        lines.push(turn(T + 120.0, 20.0));
+        let path = d.join("a.jsonl");
+        std::fs::write(&path, lines.concat()).unwrap();
+        let size = (LINE * lines.len()) as u64;
+        let landed = seek_before(&std::fs::File::open(&path).unwrap(), size, T - SLACK, &mut 0);
+        assert!(landed > 0 && landed % LINE as u64 == 0, "landed at {landed}");
+        let i = landed as usize / LINE;
+        assert!(i < 4094);
+        lines[i] = header("me", line_at(i));
+        std::fs::write(&path, lines.concat()).unwrap();
+        assert_eq!(seek_before(&std::fs::File::open(&path).unwrap(), size, T - SLACK, &mut 0), landed);
+        let dirs = vec![d.to_string_lossy().to_string()];
+        let key = Key::new(Agent::Codex, "k".into(), "me".into(), T, T + 4000.0);
+        assert_eq!(
+            read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()),
+            Local::Found(Activity { agent: Agent::Codex, first: T + 60.0, last: T + 120.0, turns: 2 })
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_repeated_total_is_not_a_turn_however_far_above_the_bracket_its_first_was() {
+        // Review on OPS-309: a rollout searched to the bracket began its
+        // count with no total, so a first event in the bracket repeating
+        // the last one above it was counted as a response.
+        let d = dir("codex-repeat");
+        let mut body = format!("{}\n{}\n", codex_meta("me"), codex_turn(T - 30.0 * 86_400.0, 50.0));
+        let pad = "x".repeat(2000);
+        let mut at = T - 29.0 * 86_400.0;
+        while (body.len() as u64) < WHOLE_BELOW + (4 << 20) {
+            body.push_str(&serde_json::json!({ "timestamp": iso(at), "type": "response_item", "pad": pad }).to_string());
+            body.push('\n');
+            at += 10.0;
+        }
+        assert!(at < T);
+        body.push_str(&format!("{}\n", codex_turn(T + 60.0, 50.0)));
+        std::fs::write(d.join("a.jsonl"), &body).unwrap();
+        let dirs = vec![d.to_string_lossy().to_string()];
+        let key = Key::new(Agent::Codex, "k".into(), "me".into(), T, T + 4000.0);
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()), Local::Nothing);
+        // A total that moved is still a turn.
+        body.push_str(&format!("{}\n", codex_turn(T + 120.0, 70.0)));
+        std::fs::write(d.join("a.jsonl"), &body).unwrap();
+        assert_eq!(
+            read_bracket(&key, &dirs, opscope_core::now(), &mut JOB_BYTES.clone()),
+            Local::Found(Activity { agent: Agent::Codex, first: T + 120.0, last: T + 120.0, turns: 1 })
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_log_that_fails_part_way_is_not_read_as_ending_there() {
+        // Review on OPS-309: a read error was taken for the end of the
+        // log, so the turns before it were counted as the whole bracket.
+        // A directory opens and then fails to read, as a bad file would.
+        let d = dir("failing");
+        let key = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + 3600.0);
+        let mut out = HashMap::new();
+        let got = file_turns(&d.to_string_lossy(), &key, &mut JOB_BYTES.clone(), &mut out);
+        assert_eq!(got, Err(Cut::Failed));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_line_longer_than_the_budget_left_is_not_read_whole() {
+        // Review on OPS-309: the budget was charged after a line was read,
+        // so one long line ran the read past it by its whole length.
+        let line = format!("{}\n", "x".repeat(1 << 20));
+        let mut r = std::io::BufReader::new(line.as_bytes());
+        let mut buf = Vec::new();
+        let (over, took) = read_capped(&mut r, &mut buf, MAX_LINE, 1000).unwrap().unwrap();
+        assert!(over);
+        assert_eq!(took, 1000);
+        let mut r = std::io::BufReader::new(line.as_bytes());
+        assert_eq!(read_capped(&mut r, &mut buf, MAX_LINE, u64::MAX).unwrap(), Some((false, line.len() as u64)));
+    }
+
+    #[test]
+    fn a_bracket_the_budget_ran_out_on_after_another_is_asked_for_again() {
+        // Review on OPS-309: a bracket a job ran out of budget on was
+        // cached as having no turns, and while a tab kept asking it was
+        // never read again, though a job of its own would have covered it.
+        let (d, h) = store("reader-deferred");
+        let logs = d.join("projects");
+        std::fs::create_dir_all(&logs).unwrap();
+        let body = format!("{}\n{}\n", claude_line("a", T + 60.0), claude_line("b", T + 2.0 * LONG + 60.0));
+        std::fs::write(logs.join("s.jsonl"), &body).unwrap();
+        let dirs = vec![logs.to_string_lossy().to_string()];
+        let first = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T, T + LONG);
+        let second = Key::new(Agent::ClaudeCode, "k".into(), String::new(), T + 2.0 * LONG, T + 3.0 * LONG);
+        // Enough for one read of the log, not two.
+        let got = read_job(
+            vec![(first.clone(), dirs.clone()), (second.clone(), dirs.clone())],
+            opscope_core::now(),
+            body.len() as u64 + 10,
+        );
+        assert_eq!(got[0].1, Local::Found(Activity { agent: Agent::ClaudeCode, first: T + 60.0, last: T + 60.0, turns: 1 }));
+        assert_eq!(got[1].1, Local::Unread);
+        // What the pass does with it: keeps the answer, asks again for the rest.
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(got)).unwrap();
+        let mut r = Reader { job: Some(rx), ..Reader::default() };
+        r.tick(&h, &mut HashMap::new(), &[], opscope_core::now());
+        assert!(r.cache.contains_key(&first));
+        assert!(!r.cache.contains_key(&second), "a deferred bracket was kept as an answer");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -1058,7 +1244,9 @@ mod tests {
         assert!(read < (1 << 20), "read {read} bytes of {}", body.len());
         // A budget too small for the bracket says nothing rather than a short count.
         let mut tiny = 10_000;
-        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut tiny), Local::Nothing);
+        assert_eq!(read_bracket(&key, &dirs, opscope_core::now(), &mut tiny), Local::Unread);
+        // ...and a job whose whole budget it is says nothing, for good.
+        assert_eq!(read_job(vec![(key.clone(), dirs.clone())], opscope_core::now(), 10_000)[0].1, Local::Nothing);
         let _ = std::fs::remove_dir_all(&d);
     }
 }
