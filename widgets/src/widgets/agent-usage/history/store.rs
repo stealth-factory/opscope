@@ -1065,7 +1065,10 @@ fn merged_key(provider: &str, alone: &str) -> String {
 /// merges into the shared one, where a sample at an instant the shared pool
 /// already holds is the one row not moved (the primary key decides, and the
 /// two are one reading of one plan); any other pool is re-parented whole.
-/// Bank, plan and watch rows move the same way. The derived rows of a pool
+/// Bank and watch rows move the same way. A plan row is one vendor's tier,
+/// so one at an instant the shared account already holds for the other
+/// vendor goes in the next instant, as [`write_unified_plan`] places two
+/// read together; only the same row met again is dropped. The derived rows of a pool
 /// that merged are dropped with it, and every pool the move touched is
 /// folded again from its first sample, as are the account's bank events.
 ///
@@ -1161,10 +1164,21 @@ fn merge_alone_into_shared(
             deleted.push(from);
             refold.push((into, f64::NEG_INFINITY));
         }
-        for table in ["bank_sample", "plan_sample", "watch_state"] {
+        // A plan row is one vendor's tier, and the other vendor's can sit at
+        // the same instant under the shared key: both are kept, as when the
+        // two are read together. Only the same row met again is dropped.
+        let plans: Vec<(f64, String)> = {
+            let mut st = tx.prepare("SELECT at, plan FROM plan_sample WHERE account_id = ?1 ORDER BY at").map_err(sql)?;
+            let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?))).map_err(sql)?;
+            rows.collect::<Result<_, _>>().map_err(sql)?
+        };
+        tx.execute("DELETE FROM plan_sample WHERE account_id = ?1", [src]).map_err(sql)?;
+        for (at, plan) in plans {
+            insert_plan(tx, dst, at, &plan)?;
+        }
+        for table in ["bank_sample", "watch_state"] {
             let cols = match table {
                 "bank_sample" => "at, left, credits",
-                "plan_sample" => "at, plan",
                 _ => "at, state, reason",
             };
             tx.execute(
@@ -1671,21 +1685,38 @@ fn write_unified_plan(
     if last.as_ref().is_some_and(|(at, was)| *was == plan || p.at <= *at) {
         return Ok(None);
     }
-    // Both vendors can be read in the same instant, and the table holds one
-    // row per moment: the later of the two goes in the next representable
-    // instant, which orders it and moves nothing a reading can see.
-    let mut at = p.at;
+    insert_plan(tx, account, p.at, &plan)
+}
+
+/// Put one `vendor:plan` row under a unified account at `at`, or as near
+/// after it as the table allows. Both vendors can be read in the same
+/// instant, and the table holds one row per moment: the later of the two
+/// goes in the next representable instant, which orders it and moves
+/// nothing a reading can see. `None` when the same row is already there,
+/// or no instant near enough was free.
+fn insert_plan(tx: &Transaction, account: i64, at: f64, plan: &str) -> Result<Option<f64>, String> {
+    let mut at = at;
     for _ in 0..4 {
-        let wrote = tx
-            .execute(
-                "INSERT OR IGNORE INTO plan_sample(account_id, at, plan) VALUES (?1, ?2, ?3)",
-                params![account, at, plan],
+        let there: Option<String> = tx
+            .query_row(
+                "SELECT plan FROM plan_sample WHERE account_id = ?1 AND at = ?2",
+                params![account, at],
+                |r| r.get(0),
             )
+            .optional()
             .map_err(sql)?;
-        if wrote > 0 {
-            return Ok(Some(at));
+        match there {
+            Some(p) if p == plan => return Ok(None),
+            Some(_) => at = f64::from_bits(at.to_bits() + 1),
+            None => {
+                tx.execute(
+                    "INSERT INTO plan_sample(account_id, at, plan) VALUES (?1, ?2, ?3)",
+                    params![account, at, plan],
+                )
+                .map_err(sql)?;
+                return Ok(Some(at));
+            }
         }
-        at = f64::from_bits(at.to_bits() + 1);
     }
     Ok(None)
 }
@@ -4344,6 +4375,50 @@ mod tests {
             .unwrap();
         assert!(gone, "the merge deletes the alone pool");
         assert!(!h.seen.keys().any(|(id, _)| *id == alone_pool), "a deleted pool's held-back readings were kept");
+    }
+
+    #[test]
+    fn a_merge_keeps_both_vendors_plan_changes_at_one_instant() {
+        // Review on OPS-309: the merge moved plan rows with INSERT OR
+        // IGNORE, so Grok's tier read at the instant Cursor's was already
+        // stored under the shared key was dropped, and the plan was folded
+        // without it.
+        let mut h = History::open(&temp("merge-plans")).unwrap();
+        let t = Thresholds::default();
+        let (mut c, _) = shared_pair(20.0, 5000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        c.plan = Some(super::super::PlanReading { at: 5000.0, plan: "pro".into() });
+        h.record(&[c.clone()], &t, 5000.0).unwrap();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        let (mut c, g) = shared_pair(30.0, 9000.0);
+        c.plan = Some(super::super::PlanReading { at: 5000.0, plan: "pro".into() });
+        h.record(&[c.clone(), g], &t, 9000.0).unwrap();
+        let plans = |h: &History| -> Vec<(f64, String)> {
+            let mut st = h
+                .conn
+                .prepare(
+                    "SELECT p.at, p.plan FROM plan_sample p JOIN account a ON a.id = p.account_id
+                      WHERE a.provider = 'spacexsi' AND a.account_key = ?1 ORDER BY p.at",
+                )
+                .unwrap();
+            st.query_map([c.account_key()], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+        };
+        let next = f64::from_bits(5000f64.to_bits() + 1);
+        assert_eq!(
+            plans(&h),
+            vec![(5000.0, "cursor:pro".to_string()), (next, "grok:supergrok".to_string())],
+            "Grok's tier read at 5000 was lost, or dated by a later pass"
+        );
+        // The same reading met twice is one row, not two.
+        let tx = h.conn.unchecked_transaction().unwrap();
+        let dst: i64 = tx
+            .query_row("SELECT id FROM account WHERE provider = 'spacexsi' AND account_key = ?1", [c.account_key()], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(insert_plan(&tx, dst, 5000.0, "grok:supergrok").unwrap(), None);
+        assert_eq!(insert_plan(&tx, dst, 1.0, "grok:x").unwrap(), Some(1.0));
+        assert_eq!(insert_plan(&tx, dst, 1.0, "cursor:y").unwrap(), Some(f64::from_bits(1f64.to_bits() + 1)));
     }
 
     #[test]
