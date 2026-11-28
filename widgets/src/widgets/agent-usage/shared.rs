@@ -988,6 +988,12 @@ pub struct Lane {
     /// when nobody knows, and the history then writes nothing for the lane
     /// rather than date it to the pass.
     pub fetched_at: f64,
+    /// On a balance with a dated grant: what the grant(s) expiring at
+    /// `reset` still hold, in `unit`. `None` when the provider does not say
+    /// - never zero for unknown. The history caps a lapse at it, so a partly
+    /// spent grant expiring beside spend is not read as its whole amount
+    /// gone (`history::overage::balance_moves`). Perplexity fills it.
+    pub grant_left: Option<f64>,
 }
 
 /// What a lane's amounts are counted in.

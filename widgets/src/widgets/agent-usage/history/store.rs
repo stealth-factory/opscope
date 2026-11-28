@@ -30,6 +30,29 @@
 //! * a file SQLite calls damaged is **renamed** `.damaged-<epoch>`, never
 //!   deleted, and [`History::notice`] says so.
 //!
+//! ## Schema versions
+//!
+//! * **v1** ([`V1`]): every table, spec §3.6.
+//! * **v2** ([`V2`], OPS-309): two nullable columns, nothing else. Raw
+//!   samples are never rewritten: a v1 file keeps every row as it was, and
+//!   both columns read `NULL` on rows written before the migration, where
+//!   each reader falls back to the v1 rule. So the derived tables fold the
+//!   same from a migrated file and the migration re-folds nothing.
+//!   - `sample.grant_left REAL`: on a balance sample, what the grant whose
+//!     expiry is the sample's `reset_at` (the soonest dated one) still held,
+//!     in the pool's unit, summed when several grants share that expiry.
+//!     Generic: any provider that states a per-grant remainder fills it
+//!     through [`Lane::grant_left`]; today only Perplexity does
+//!     (`remaining_cents`). `NULL` is unstated - an old sample, a provider
+//!     that does not say, or a grant among those that did not say - never
+//!     zero. [`overage::balance_moves`] caps a lapse at it.
+//!   - `pool.last_pct REAL`: the percentage of the live answer `last_seen`
+//!     is the time of - set with it, on every live answer, written as a
+//!     sample or held back as unchanged - so the idle check in [`gone_at`]
+//!     reads the same answer the absence is timed from. `NULL` on a pool not
+//!     answered live since the migration, or whose answer had no finite
+//!     percentage; [`gone_at`] then reads the last live sample, as v1 did.
+//!
 //! Every write ([`History::record`]) is one `BEGIN IMMEDIATE` transaction
 //! that reads the previous state from the file, not from this pane's
 //! memory, so two panes cannot both open a cycle; the unique keys back
@@ -65,7 +88,7 @@ const SPACEXSI_HEADING: &str = crate::shared::SPACEXSI;
 
 /// Migration `n` (from 0) takes the file from `user_version = n` to `n + 1`.
 /// Forward only: never edit one that has shipped, add the next.
-pub const MIGRATIONS: &[&str] = &[V1];
+pub const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Schema v1, spec §3.6: every table, the derived ones phases 2 to 5 fill
 /// included, so the schema does not change between phases.
@@ -208,6 +231,13 @@ CREATE TABLE overage_span (
   exhausted   TEXT NOT NULL,
   PRIMARY KEY (overage_id, at_hi)
 );
+";
+
+/// Schema v2 (OPS-309): see the module doc. Nullable columns only, so old
+/// rows read `NULL` - unstated - and are not rewritten.
+const V2: &str = "
+ALTER TABLE sample ADD COLUMN grant_left REAL;
+ALTER TABLE pool ADD COLUMN last_pct REAL;
 ";
 
 /// Where the history lives.
@@ -1053,19 +1083,21 @@ fn upsert_account(tx: &Transaction, provider: &str, key: &str, heading: &str, no
 /// The pool row for `lane`, made or brought up to date. `last_seen` moves
 /// only on a live answer, and on every one, written or held back as
 /// unchanged: it is the liveness [`gone_at`] measures absence from, which
-/// the samples alone understate by up to the heartbeat.
+/// the samples alone understate by up to the heartbeat. `last_pct` moves
+/// with it, so the two always describe one answer (schema v2).
 fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i64, String> {
     let (currency, exponent) = match &lane.unit {
         crate::shared::Unit::Money { currency, exponent } => (Some(currency.clone()), Some(*exponent)),
         _ => (None, None),
     };
     tx.query_row(
-        "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+        "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen, last_pct)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?10)
          ON CONFLICT(account_id, pool_key) DO UPDATE SET label = excluded.label, role = excluded.role,
              unit = excluded.unit, currency = excluded.currency, exponent = excluded.exponent,
              first_seen = MIN(first_seen, excluded.first_seen),
-             last_seen = CASE WHEN ?9 THEN MAX(last_seen, excluded.last_seen) ELSE last_seen END
+             last_seen = CASE WHEN ?9 THEN MAX(last_seen, excluded.last_seen) ELSE last_seen END,
+             last_pct = CASE WHEN ?9 AND excluded.last_seen >= last_seen THEN excluded.last_pct ELSE last_pct END
          RETURNING id",
         params![
             account,
@@ -1076,7 +1108,8 @@ fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i
             currency,
             exponent,
             at,
-            !lane.stale
+            !lane.stale,
+            lane.pct.is_finite().then_some(lane.pct)
         ],
         |r| r.get(0),
     )
@@ -1099,7 +1132,7 @@ fn pools_of(tx: &Transaction, account: i64) -> Result<Vec<i64>, String> {
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
-const SAMPLE_COLS: &str = "at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi";
+const SAMPLE_COLS: &str = "at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi, grant_left";
 
 fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
     Ok(Sample {
@@ -1111,6 +1144,7 @@ fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
         reset_at: r.get(5)?,
         source: Source::from_name(&r.get::<_, String>(6)?),
         spacexsi: r.get(7)?,
+        grant_left: r.get(8)?,
     })
 }
 
@@ -1167,6 +1201,7 @@ fn write_lanes(
             reset_at: lane.reset,
             source: if lane.stale { Source::Cached } else { Source::Live },
             spacexsi: spacexsi.map(str::to_string),
+            grant_left: lane.grant_left.filter(|g| g.is_finite()),
         };
         let (before, after) = neighbours(tx, pool, sample.at)?;
         if super::should_write(before.as_ref(), after.as_ref(), &sample) {
@@ -1263,7 +1298,7 @@ fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String
     let n = tx
         .execute(
             &format!(
-                "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
             ),
             params![
                 pool,
@@ -1274,7 +1309,8 @@ fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String
                 s.window_secs,
                 s.reset_at,
                 s.source.name(),
-                s.spacexsi
+                s.spacexsi,
+                s.grant_left
             ],
         )
         .map_err(sql)?;
@@ -1635,7 +1671,12 @@ fn gone_candidates(tx: &Transaction, account: i64, present: &[String]) -> Result
 /// pool's `last_seen`: an answer that changed nothing is held back from
 /// the samples until the hourly heartbeat, and measuring from the sample
 /// alone closed the cycle up to an hour early. `last_seen` is stored, not
-/// derived, so a full re-fold reads the same.
+/// derived, so a full re-fold reads the same. The idle check reads that
+/// same answer: `last_pct` where `last_seen` is the later, so a pool that
+/// fell to about zero inside the five-minute spacing, held back from the
+/// samples, is idle - not the earlier sample's figure (CodeRabbit on #681,
+/// OPS-309). A pool with no `last_pct` (not answered live since schema v2)
+/// reads the sample's, as before.
 fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, String> {
     // From the samples only, never from the cycles this fold is about to
     // replace: the pool's last live reading, its window and stated end.
@@ -1657,10 +1698,11 @@ fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, S
     let Some((sampled, pct, window, ends_at)) = last else {
         return Ok(None);
     };
-    let seen: f64 = tx
-        .query_row("SELECT last_seen FROM pool WHERE id = ?1", [pool], |r| r.get(0))
+    let (seen, seen_pct): (f64, Option<f64>) = tx
+        .query_row("SELECT last_seen, last_pct FROM pool WHERE id = ?1", [pool], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(sql)?;
     let last = sampled.max(seen);
+    let pct = if seen > sampled { seen_pct.or(pct) } else { pct };
     let Some(window) = window.filter(|w| *w > 0.0) else {
         return Ok(None);
     };
@@ -2328,6 +2370,100 @@ mod tests {
         );
     }
 
+    /// Every row of `table`, as text, in a fixed order.
+    fn rows_of(c: &Connection, table: &str, cols: &str) -> Vec<String> {
+        let mut st = c.prepare(&format!("SELECT {cols} FROM {table} ORDER BY 1, 2")).unwrap();
+        let n = st.column_count();
+        st.query_map([], |r| {
+            Ok((0..n)
+                .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
+                .collect::<Vec<_>>()
+                .join("|"))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    fn columns_of(c: &Connection, table: &str) -> Vec<String> {
+        let mut st = c.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        st.query_map([], |r| r.get::<_, String>(1)).unwrap().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_v1_file_migrates_to_v2_with_its_data_intact_and_racing_panes_migrate_once() {
+        // A v1 file with history in it: written by this build, then taken
+        // back to exactly the v1 shape (the two v2 columns dropped).
+        let p = temp("v1-to-v2");
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        {
+            let mut h = History::open(&p).unwrap();
+            let mut at = a;
+            for pct in [10.0, 25.0, 40.0, 3.0, 9.0] {
+                h.record(&[two_pools(at, Some((pct, a + 4.0 * H)), pct / 2.0, false)], &t, at).unwrap();
+                at += 2.0 * H;
+            }
+        }
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute_batch(
+                "ALTER TABLE sample DROP COLUMN grant_left; ALTER TABLE pool DROP COLUMN last_pct;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let sample_cols = "pool_id, at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi";
+        let pool_cols = "id, account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen";
+        let before = {
+            let c = Connection::open(&p).unwrap();
+            assert_eq!(c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            (
+                rows_of(&c, "sample", sample_cols),
+                rows_of(&c, "pool", pool_cols),
+                rows_of(&c, "cycle", "*"),
+                rows_of(&c, "reset_event", "*"),
+            )
+        };
+        assert!(!before.0.is_empty() && !before.2.is_empty());
+        // Two panes open it at once: one migrates, the other finds it done.
+        let opened: Vec<_> = (0..2)
+            .map(|_| {
+                let p = p.clone();
+                std::thread::spawn(move || History::open(&p).map(|_| ()))
+            })
+            .collect();
+        for o in opened {
+            o.join().unwrap().unwrap();
+        }
+        let h = History::open(&p).unwrap();
+        let v: i64 = h.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
+        let after = (
+            rows_of(&h.conn, "sample", sample_cols),
+            rows_of(&h.conn, "pool", pool_cols),
+            rows_of(&h.conn, "cycle", "*"),
+            rows_of(&h.conn, "reset_event", "*"),
+        );
+        assert_eq!(after, before, "every raw and derived row as it was");
+        // The new columns are there, unstated on the old rows.
+        let unstated: i64 = h
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sample WHERE grant_left IS NOT NULL)
+                      + (SELECT COUNT(*) FROM pool WHERE last_pct IS NOT NULL)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unstated, 0);
+        // And the migrated file has the shape of a new one.
+        let fresh = History::open(&temp("v2-fresh")).unwrap();
+        for table in ["sample", "pool"] {
+            assert_eq!(columns_of(&h.conn, table), columns_of(&fresh.conn, table), "{table}");
+        }
+    }
+
     #[test]
     fn a_damaged_file_is_renamed_not_deleted_and_said_once() {
         let p = temp("damaged");
@@ -2684,6 +2820,47 @@ mod tests {
             at += 0.5 * H;
         }
         assert!(!gone(&h));
+    }
+
+    #[test]
+    fn a_pool_that_falls_to_about_zero_just_before_it_vanishes_is_idle_not_gone() {
+        // CodeRabbit 4724191237 on #681 (OPS-309 item 8): the five-hour pool
+        // reads 40%, then 0% a minute later - inside the five-minute spacing,
+        // so the 0% is not written, though it is a live answer and moves
+        // `last_seen`. Then it is missing for a whole window while the weekly
+        // pool answers. The absence is timed from the 0% answer, so the idle
+        // check reads that answer too: a limit last read at about zero is
+        // idle, and its absence is no sign it is gone.
+        let p = temp("pool-gone-fell-to-zero");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        h.record(&[two_pools(a + 60.0, Some((0.0, end)), 10.0, false)], &t, a + 60.0).unwrap();
+        let key = obs(vec![]).account_key();
+        assert_eq!(h.samples("codex", &key, "primary_window").unwrap().len(), 1, "the 0% is held back");
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert!(c.iter().all(|c| c.end_reason != Some(EndReason::PoolGone)), "{c:#?}");
+        let (stored, full) = stored_then_full(&mut h, "primary_window");
+        assert_eq!(stored, full);
+        // The other way round - 0% stored, 40% held back - the last live
+        // answer is not idle, and the pool is gone a window after it.
+        let mut g = History::open(&temp("pool-gone-rose-from-zero")).unwrap();
+        g.record(&[two_pools(a, Some((0.0, end)), 10.0, false)], &t, a).unwrap();
+        g.record(&[two_pools(a + 60.0, Some((40.0, end)), 10.0, false)], &t, a + 60.0).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            g.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let c = g.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c.last().unwrap().end_reason, Some(EndReason::PoolGone), "{c:#?}");
     }
 
     #[test]
@@ -3729,6 +3906,7 @@ mod tests {
                 reset_at: Some(reset),
                 source: Source::Backfill,
                 spacexsi: None,
+                grant_left: None,
             },
         }
     }

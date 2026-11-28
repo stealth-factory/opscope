@@ -1291,6 +1291,7 @@ pub fn lanes(d: &Data) -> Vec<Lane> {
             used: Some(q.on_demand_used.unwrap_or(0.0)),
             limit: Some(cap),
             fetched_at: billed.unwrap_or(0.0),
+            grant_left: None,
         });
     }
     out

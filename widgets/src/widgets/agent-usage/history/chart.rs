@@ -489,6 +489,7 @@ mod tests {
             reset_at: None,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
         }
     }
 

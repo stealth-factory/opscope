@@ -97,9 +97,11 @@ pub enum MoveKind {
     /// It rose: a purchase or a grant.
     TopUp,
     /// It fell across a grant's stated expiry, by no more than the grants
-    /// that left the balance's total held (see [`balance_moves`]). Not spend
-    /// - though spend in the same bracket, up to that amount, cannot be told
-    /// apart from it; what falls past it is spend, a move of its own.
+    /// that left the balance's total held (see [`balance_moves`]) - or, where
+    /// the reading before stated it, what the lapsing grant itself still
+    /// held. Not spend - though spend from that grant in the same bracket,
+    /// up to that amount, cannot be told apart from it; what falls past it
+    /// is spend, a move of its own.
     Expiry,
 }
 
@@ -299,6 +301,14 @@ fn expiries(samples: &[Sample]) -> Vec<f64> {
 /// bracket. A limit that did not fall lost no grant, and its fall is all
 /// spend. A balance with no ceiling (Codex credits, Devin, Droid) states
 /// only what is left, so nothing bounds an expiry but the fall itself.
+///
+/// Tighter still where the reading before states what the lapsing grant
+/// still held (`grant_left`, schema v2): a grant part spent loses only its
+/// remainder, not its whole amount, so a fall past that remainder is spend
+/// even when the limit fell further (Codex on #681, OPS-309). It applies
+/// when the one expiry in the bracket is that reading's `reset_at`, the
+/// grant `grant_left` describes; with no remainder stated, or more than one
+/// expiry in the bracket, the limit's fall is the bound, as before.
 pub fn balance_moves(samples: &[Sample], expiries: &[f64]) -> Vec<Move> {
     let mut out = Vec::new();
     let mut prev: Option<(&Sample, f64)> = None;
@@ -320,13 +330,18 @@ pub fn balance_moves(samples: &[Sample], expiries: &[f64]) -> Vec<Move> {
                 push(d, MoveKind::TopUp);
             } else if d < -EPS {
                 let fall = -d;
-                let expired = if expiries.iter().any(|e| *e > at && *e <= s.at) {
-                    match (p.used, s.used, p.limit, s.limit) {
+                let lapsed: Vec<f64> = expiries.iter().copied().filter(|e| *e > at && *e <= s.at).collect();
+                let expired = if lapsed.is_empty() {
+                    0.0
+                } else {
+                    let bound = match (p.used, s.used, p.limit, s.limit) {
                         (Some(_), Some(_), Some(lo), Some(hi)) => (lo - hi).clamp(0.0, fall),
                         _ => fall,
+                    };
+                    match p.grant_left.filter(|g| g.is_finite() && *g >= 0.0) {
+                        Some(held) if lapsed.len() == 1 && p.reset_at == Some(lapsed[0]) => held.min(bound),
+                        _ => bound,
                     }
-                } else {
-                    0.0
                 };
                 push(expired, MoveKind::Expiry);
                 push(fall - expired, MoveKind::Spend);
@@ -972,6 +987,7 @@ mod tests {
             reset_at: reset,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
         }
     }
 
@@ -985,6 +1001,7 @@ mod tests {
             reset_at: Some(reset),
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
         }
     }
 
@@ -1244,6 +1261,7 @@ mod tests {
             reset_at: Some(r),
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
         };
         let premium = vec![pct(a, 100.0, r)];
         let inc = [Included { pool_id: 4, samples: &premium }];
@@ -1266,6 +1284,7 @@ mod tests {
             reset_at: expiry,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
         };
         let expiry = a + 3.0 * H + 60.0;
         let samples = vec![
