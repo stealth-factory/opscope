@@ -33,9 +33,9 @@
 //! ## Schema versions
 //!
 //! * **v1** ([`V1`]): every table, spec §3.6.
-//! * **v2** ([`V2`], OPS-309): two nullable columns, nothing else. Raw
+//! * **v2** ([`V2`], OPS-309): three nullable columns, nothing else. Raw
 //!   samples are never rewritten: a v1 file keeps every row as it was, and
-//!   both columns read `NULL` on rows written before the migration, where
+//!   all three read `NULL` on rows written before the migration, where
 //!   each reader falls back to the v1 rule. So the derived tables fold the
 //!   same from a migrated file and the migration re-folds nothing.
 //!   - `sample.grant_left REAL`: on a balance sample, what the grant whose
@@ -52,6 +52,12 @@
 //!     reads the same answer the absence is timed from. `NULL` on a pool not
 //!     answered live since the migration, or whose answer had no finite
 //!     percentage; [`gone_at`] then reads the last live sample, as v1 did.
+//!   - `pool.last_pct_at REAL`: the `last_seen` that `last_pct` was set
+//!     with. A pane on an older build, opened before the migration, goes
+//!     on moving `last_seen` without `last_pct`, so the two can come apart;
+//!     [`gone_at`] trusts `last_pct` only while `last_pct_at = last_seen`,
+//!     and otherwise reads the last live sample, as v1 did. `NULL` on a
+//!     pool not answered live since the migration.
 //!
 //! Every write ([`History::record`]) is one `BEGIN IMMEDIATE` transaction
 //! that reads the previous state from the file, not from this pane's
@@ -238,6 +244,7 @@ CREATE TABLE overage_span (
 const V2: &str = "
 ALTER TABLE sample ADD COLUMN grant_left REAL;
 ALTER TABLE pool ADD COLUMN last_pct REAL;
+ALTER TABLE pool ADD COLUMN last_pct_at REAL;
 ";
 
 /// Where the history lives.
@@ -1088,6 +1095,8 @@ fn merge_alone_into_shared(
                 "UPDATE pool SET first_seen = MIN(first_seen, (SELECT first_seen FROM pool WHERE id = ?1)),
                      last_pct = CASE WHEN (SELECT last_seen FROM pool WHERE id = ?1) > last_seen
                                      THEN (SELECT last_pct FROM pool WHERE id = ?1) ELSE last_pct END,
+                     last_pct_at = CASE WHEN (SELECT last_seen FROM pool WHERE id = ?1) > last_seen
+                                        THEN (SELECT last_pct_at FROM pool WHERE id = ?1) ELSE last_pct_at END,
                      last_seen = MAX(last_seen, (SELECT last_seen FROM pool WHERE id = ?1))
                   WHERE id = ?2",
                 params![from, into],
@@ -1283,20 +1292,23 @@ fn upsert_account(tx: &Transaction, provider: &str, key: &str, heading: &str, no
 /// only on a live answer, and on every one, written or held back as
 /// unchanged: it is the liveness [`gone_at`] measures absence from, which
 /// the samples alone understate by up to the heartbeat. `last_pct` moves
-/// with it, so the two always describe one answer (schema v2).
+/// with it, and `last_pct_at` records which `last_seen` it came with, so
+/// an older build moving `last_seen` alone is seen to have (schema v2).
 fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i64, String> {
     let (currency, exponent) = match &lane.unit {
         crate::shared::Unit::Money { currency, exponent } => (Some(currency.clone()), Some(*exponent)),
         _ => (None, None),
     };
     tx.query_row(
-        "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen, last_pct)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?10)
+        "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen, last_pct,
+                          last_pct_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?10, ?8)
          ON CONFLICT(account_id, pool_key) DO UPDATE SET label = excluded.label, role = excluded.role,
              unit = excluded.unit, currency = excluded.currency, exponent = excluded.exponent,
              first_seen = MIN(first_seen, excluded.first_seen),
              last_seen = CASE WHEN ?9 THEN MAX(last_seen, excluded.last_seen) ELSE last_seen END,
-             last_pct = CASE WHEN ?9 AND excluded.last_seen >= last_seen THEN excluded.last_pct ELSE last_pct END
+             last_pct = CASE WHEN ?9 AND excluded.last_seen >= last_seen THEN excluded.last_pct ELSE last_pct END,
+             last_pct_at = CASE WHEN ?9 AND excluded.last_seen >= last_seen THEN excluded.last_seen ELSE last_pct_at END
          RETURNING id",
         params![
             account,
@@ -1874,8 +1886,9 @@ fn gone_candidates(tx: &Transaction, account: i64, present: &[String]) -> Result
 /// same answer: `last_pct` where `last_seen` is the later, so a pool that
 /// fell to about zero inside the five-minute spacing, held back from the
 /// samples, is idle - not the earlier sample's figure (CodeRabbit on #681,
-/// OPS-309). A pool with no `last_pct` (not answered live since schema v2)
-/// reads the sample's, as before.
+/// OPS-309). A pool with no `last_pct` (not answered live since schema v2),
+/// or one set with an earlier `last_seen` than the stored one - an older
+/// build moved `last_seen` alone - reads the sample's, as before.
 fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, String> {
     // From the samples only, never from the cycles this fold is about to
     // replace: the pool's last live reading, its window and stated end.
@@ -1897,11 +1910,13 @@ fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, S
     let Some((sampled, pct, window, ends_at)) = last else {
         return Ok(None);
     };
-    let (seen, seen_pct): (f64, Option<f64>) = tx
-        .query_row("SELECT last_seen, last_pct FROM pool WHERE id = ?1", [pool], |r| Ok((r.get(0)?, r.get(1)?)))
+    let (seen, seen_pct, pct_at): (f64, Option<f64>, Option<f64>) = tx
+        .query_row("SELECT last_seen, last_pct, last_pct_at FROM pool WHERE id = ?1", [pool], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .map_err(sql)?;
     let last = sampled.max(seen);
-    let pct = if seen > sampled { seen_pct.or(pct) } else { pct };
+    let pct = if seen > sampled && pct_at == Some(seen) { seen_pct.or(pct) } else { pct };
     let Some(window) = window.filter(|w| *w > 0.0) else {
         return Ok(None);
     };
@@ -2592,7 +2607,7 @@ mod tests {
     #[test]
     fn a_v1_file_migrates_to_v2_with_its_data_intact_and_racing_panes_migrate_once() {
         // A v1 file with history in it: written by this build, then taken
-        // back to exactly the v1 shape (the two v2 columns dropped).
+        // back to exactly the v1 shape (the v2 columns dropped).
         let p = temp("v1-to-v2");
         let t = Thresholds::default();
         let a = 2_000_000.0;
@@ -2608,7 +2623,7 @@ mod tests {
             let c = Connection::open(&p).unwrap();
             c.execute_batch(
                 "ALTER TABLE sample DROP COLUMN grant_left; ALTER TABLE pool DROP COLUMN last_pct;
-                 PRAGMA user_version = 1;",
+                 ALTER TABLE pool DROP COLUMN last_pct_at; PRAGMA user_version = 1;",
             )
             .unwrap();
         }
@@ -2650,7 +2665,8 @@ mod tests {
             .conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM sample WHERE grant_left IS NOT NULL)
-                      + (SELECT COUNT(*) FROM pool WHERE last_pct IS NOT NULL)",
+                      + (SELECT COUNT(*) FROM pool WHERE last_pct IS NOT NULL)
+                      + (SELECT COUNT(*) FROM pool WHERE last_pct_at IS NOT NULL)",
                 [],
                 |r| r.get(0),
             )
@@ -3059,6 +3075,34 @@ mod tests {
             at += 0.5 * H;
         }
         let c = g.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c.last().unwrap().end_reason, Some(EndReason::PoolGone), "{c:#?}");
+    }
+
+    #[test]
+    fn a_last_pct_from_an_earlier_answer_than_last_seen_is_not_trusted() {
+        // Review on OPS-309: a pane on an older build, opened before the
+        // migration, goes on moving `last_seen` and knows nothing of
+        // `last_pct`. The 0% this build stored is then the figure of an
+        // earlier answer than the one the absence is timed from, and must
+        // not make the pool idle: the v1 rule, the last sample's figure,
+        // decides instead.
+        let mut h = History::open(&temp("pool-gone-old-pane")).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        h.record(&[two_pools(a + 60.0, Some((0.0, end)), 10.0, false)], &t, a + 60.0).unwrap();
+        // The old pane's live answer, two minutes on: `last_seen` only.
+        h.conn
+            .execute("UPDATE pool SET last_seen = ?1 WHERE pool_key = 'primary_window'", [a + 120.0])
+            .unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let key = obs(vec![]).account_key();
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
         assert_eq!(c.last().unwrap().end_reason, Some(EndReason::PoolGone), "{c:#?}");
     }
 
