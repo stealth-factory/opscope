@@ -3,6 +3,21 @@
 Every release, and what changed in it. Generated from the commit subjects,
 which is why they are worth writing carefully.
 
+## [2.17.0] - 2026-11-28
+
+### Bug Fixes
+
+- **agent-usage**: History follow-ups from OPS-303 - identity, lapsed grants, local turns (OPS-309) (#690)
+
+### Documentation
+
+- Position opscope as mission control for software factories (#680)
+- **agents**: Record two working rules and ignore local tool state (#682)
+
+### Features
+
+- **agent-usage**: Utilisation history per provider and pool, with resets, overage and charts (OPS-303) (#681)
+
 ## [2.16.1] - 2026-11-27
 
 ### Bug Fixes
