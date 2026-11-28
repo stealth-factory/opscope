@@ -2067,6 +2067,23 @@ goes:
   account's quota under another. The tab still shows the log's figure. A
   billing answer that took its percentage from such a line is written
   without the percentage.
+- **When local work could have drawn it.** Spend seen only after a gap is
+  known to the gap: "somewhere in these 20 hours". For Claude's extra usage
+  and Codex credits, the newest three such stretches an hour or longer,
+  spent while an allowance was used up, get a line naming the turns this
+  machine's own agent made inside them:
+  `A$4.10 spent Tue 18 Nov 12:00–Wed 19 Nov 08:00; local turns in this
+  bracket: Tue 18 Nov 14:00–16:10 (Claude Code, 23 turns)`. That is activity,
+  never an amount: the figure is the stretch's own, nothing divides it among
+  the turns, and spend from another device or the web app is invisible to it,
+  which is why it says *local*. Only the provider's own agent counts - Claude
+  Code transcripts under the account's config dirs, Codex rollouts whose
+  session names the account - and a provider with no local agent gets no
+  line. A stretch with no local turns says nothing rather than "no local
+  turns": Claude Code deletes old transcripts, and a log that is gone reads
+  exactly like an idle machine. The logs are read on a thread of their own,
+  only those written since the stretch began and only the part of each that
+  covers it, once per stretch.
 
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one

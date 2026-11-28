@@ -479,7 +479,9 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
             let facts = crate::claude::history_facts(d);
             if asked(&facts, &lanes) {
                 let heading = crate::claude::summary_heading(&d.label, multi);
-                out.push(build("claude", tab, heading, d.label.clone(), lanes, facts));
+                let mut o = build("claude", tab, heading, d.label.clone(), lanes, facts);
+                o.local_logs = vec![crate::claude::projects_path(&d.dir)];
+                out.push(o);
             }
         }
     }
@@ -516,6 +518,12 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
             let mut o = build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts);
             if name == "copilot" {
                 o.signer = crate::copilot::history_signer(&s.copilot);
+            }
+            if name == "codex" {
+                o.local_logs = crate::history::backfill::rollout_roots()
+                    .iter()
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .collect();
             }
             out.push(o);
         }

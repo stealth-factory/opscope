@@ -873,10 +873,66 @@ fn overage_rows(
     let names: Vec<String> = bars.iter().map(|b| month_text(b.starts_at)).collect();
     let cells = money_bars(&mut rows, &values, &names, pool, room, p, plots);
     let shown = if cells == 0 { bars } else { &bars[bars.len() - cells..] };
-    for line in overage_lines(pool, shown, roll_day) {
+    for line in overage_lines(pool, shown, roll_day).into_iter().chain(local_lines(pool)) {
         wrapped(&mut rows, &line, room, &p.dim, 2);
     }
     rows
+}
+
+/// `Tue 18 Nov 14:00`, with the year outside this one.
+fn when_text(at: f64) -> String {
+    use chrono::Datelike;
+    match local(at) {
+        Some(t) if t.year() == chrono::Local::now().year() => t.format("%a %-d %b %H:%M").to_string(),
+        Some(t) => t.format("%a %-d %b %Y %H:%M").to_string(),
+        None => "?".into(),
+    }
+}
+
+/// `Tue 18 Nov 14:00–16:10`, the day said once when both ends share it.
+fn when_range(a: f64, b: f64) -> String {
+    let (from, to) = (when_text(a), when_text(b));
+    if from == to {
+        return from;
+    }
+    match (local(a), local(b)) {
+        (Some(x), Some(y)) if x.date_naive() == y.date_naive() => format!("{from}–{}", y.format("%H:%M")),
+        _ => format!("{from}–{to}"),
+    }
+}
+
+/// The lines about this machine's agent turns inside an overage or balance
+/// pool's newest long spend brackets (§6.3, source 3). Activity only: the
+/// amount is the span's own stored figure, and nothing divides it among the
+/// turns. Every line says *local*, because spend from any other device is
+/// invisible to it. A bracket with no local turns says nothing: a log
+/// cleaned up or never written here reads exactly like an idle machine.
+pub fn local_lines(pool: &PoolHistory) -> Vec<String> {
+    use super::local::Local;
+    let amount = |v: f64| amount_text(&pool.unit, pool.currency.as_deref(), pool.exponent, v);
+    let mut lines: Vec<String> = pool
+        .brackets
+        .iter()
+        .filter_map(|b| match &b.local {
+            Local::Found(a) => Some(format!(
+                "{} spent {}; local turns in this bracket: {} ({}, {})",
+                amount(b.amount),
+                when_range(b.at_lo, b.at_hi),
+                when_range(a.first, a.last),
+                a.agent.name(),
+                plural(a.turns, "turn", "turns")
+            )),
+            _ => None,
+        })
+        .collect();
+    let failed = pool.brackets.iter().find_map(|b| match &b.local {
+        Local::Failed(why) => Some(why),
+        _ => None,
+    });
+    if let Some(why) = failed {
+        lines.push(format!("local turns not read: {why}"));
+    }
+    lines
 }
 
 /// The lines under an overage pool's chart: each bar's spend, in money or
@@ -917,7 +973,7 @@ fn balance_rows(pool: &PoolHistory, months: &[MonthTotal], w: usize, p: &Palette
     let names: Vec<String> = months.iter().map(|m| m.label.split(' ').next().unwrap_or("?").to_string()).collect();
     let cells = money_bars(&mut rows, &values, &names, pool, room, p, plots);
     let shown = if cells == 0 { months } else { &months[months.len() - cells..] };
-    for line in balance_lines(pool, shown) {
+    for line in balance_lines(pool, shown).into_iter().chain(local_lines(pool)) {
         wrapped(&mut rows, &line, room, &p.dim, 2);
     }
     rows
@@ -1077,6 +1133,7 @@ mod tests {
             total,
             since: Some(T0),
             body,
+            brackets: Vec::new(),
         }
     }
 
@@ -1167,6 +1224,72 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn bracketed(t: &mut TabHistory) {
+        use super::super::local::{Activity, Agent, Bracket, Local};
+        let found = |agent, lo: f64, turns| Bracket {
+            at_lo: lo,
+            at_hi: lo + 20.0 * H,
+            amount: 4.10,
+            local: Local::Found(Activity { agent, first: lo + 2.0 * H, last: lo + 4.0 * H + 600.0, turns }),
+        };
+        t.pools[2].brackets = vec![
+            found(Agent::ClaudeCode, T0 + 3.0 * DAY, 23),
+            Bracket { local: Local::Nothing, ..found(Agent::ClaudeCode, T0 + 5.0 * DAY, 1) },
+            Bracket { local: Local::Unread, ..found(Agent::ClaudeCode, T0 + 6.0 * DAY, 1) },
+        ];
+        t.pools[3].brackets = vec![
+            found(Agent::Codex, T0 + 40.0 * DAY, 1),
+            Bracket { local: Local::Failed("the local log reader panicked".into()), ..found(Agent::Codex, T0 + 41.0 * DAY, 1) },
+        ];
+    }
+
+    #[test]
+    fn local_turns_sit_beside_their_bracket_whole_at_every_width() {
+        let mut t = tab();
+        bracketed(&mut t);
+        let extra = local_lines(&t.pools[2]);
+        let credits = local_lines(&t.pools[3]);
+        // Only the bracket with turns found gets a line; none found, or not
+        // read yet, says nothing rather than "no local turns".
+        assert_eq!(extra.len(), 1, "{extra:?}");
+        assert!(extra[0].starts_with("A$4.10 spent "), "{}", extra[0]);
+        assert!(extra[0].contains("; local turns in this bracket: "), "{}", extra[0]);
+        assert!(extra[0].ends_with("(Claude Code, 23 turns)"), "{}", extra[0]);
+        assert!(credits[0].ends_with("(Codex, 1 turn)"), "{}", credits[0]);
+        assert_eq!(credits[1], "local turns not read: the local log reader panicked");
+        for w in 12..=160 {
+            let (rows, plots) = draw(&t, w);
+            for r in &rows {
+                assert!(tc::display_width(r) < w, "width {w}: {r:?}");
+            }
+            for plot in &plots {
+                assert!(plot.x + plot.width < w, "width {w}: a chart past the edge");
+            }
+            let all = squeezed(&rows);
+            for line in extra.iter().chain(&credits) {
+                let words: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+                assert!(all.contains(&words), "width {w}: {line:?} not whole in {all}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_bracket_on_one_day_names_the_day_once() {
+        // Ten in the morning local time, whatever zone the test runs in.
+        let lo = {
+            use chrono::TimeZone;
+            let day = local(T0).unwrap().date_naive().and_hms_opt(10, 0, 0).unwrap();
+            chrono::Local.from_local_datetime(&day).earliest().unwrap().timestamp() as f64
+        };
+        let same = when_range(lo, lo + 2.0 * H + 600.0);
+        assert_eq!(same.matches(':').count(), 2, "{same}");
+        assert!(!same.contains(" – "), "{same}");
+        assert_eq!(when_range(lo, lo), when_text(lo));
+        let across = when_range(lo, lo + DAY);
+        assert_eq!(across.matches(':').count(), 2);
+        assert!(across.len() > same.len(), "{across} vs {same}");
     }
 
     #[test]
