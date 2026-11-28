@@ -479,7 +479,9 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
             let facts = crate::claude::history_facts(d);
             if asked(&facts, &lanes) {
                 let heading = crate::claude::summary_heading(&d.label, multi);
-                out.push(build("claude", tab, heading, d.label.clone(), lanes, facts));
+                let mut o = build("claude", tab, heading, d.label.clone(), lanes, facts);
+                o.local_logs = vec![crate::claude::projects_path(&d.dir)];
+                out.push(o);
             }
         }
     }
@@ -513,7 +515,17 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
                 "droid" => crate::droid::history_lanes(&s.droid),
                 _ => Vec::new(),
             });
-            out.push(build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts));
+            let mut o = build(name, name.to_string(), name.to_uppercase(), String::new(), lanes, facts);
+            if name == "copilot" {
+                o.signer = crate::copilot::history_signer(&s.copilot);
+            }
+            if name == "codex" {
+                o.local_logs = crate::history::backfill::rollout_roots()
+                    .iter()
+                    .map(|r| r.to_string_lossy().into_owned())
+                    .collect();
+            }
+            out.push(o);
         }
     }
     // Cursor and Grok, with the unified plan's copy where it applies
@@ -524,7 +536,8 @@ pub fn observations(s: &State, now: f64) -> Vec<crate::history::Observation> {
         if !present(name) {
             continue;
         }
-        let mut lanes = lanes_of(name, s);
+        // Grok's less a log figure that may be another sign-in's (OPS-309).
+        let mut lanes = if name == "grok" { crate::grok::history_lanes(&s.grok) } else { lanes_of(name, s) };
         let facts = if name == "cursor" {
             // Spend with no cap, which the summary draws no bar for.
             lanes.extend(crate::cursor::history_lanes(&s.cursor));

@@ -113,6 +113,29 @@ pub struct Tail<P> {
 /// How much of a log's start is kept to recognise it by.
 const HEAD: usize = 1024;
 
+impl<P> Tail<P> {
+    /// The lines `path` holds past what this reader has consumed, when it
+    /// is still the file that was read and no more than `most` bytes were
+    /// appended since; `None` otherwise. With the reader's own state up to
+    /// `offset`, that is the whole file, read without starting over.
+    pub(crate) fn appended(&self, path: &str, most: u64) -> Option<Vec<String>> {
+        use std::os::unix::fs::{FileExt, MetadataExt};
+        let f = std::fs::File::open(path).ok()?;
+        let meta = f.metadata().ok()?;
+        let size = meta.size();
+        if (meta.dev(), meta.ino()) != self.file || size < self.offset || size - self.offset > most {
+            return None;
+        }
+        let mut head = vec![0u8; self.head_len];
+        if f.read_exact_at(&mut head, 0).is_err() || fnv(&head) != self.head_hash {
+            return None;
+        }
+        let mut rest = vec![0u8; (size - self.offset) as usize];
+        f.read_exact_at(&mut rest, self.offset).ok()?;
+        Some(String::from_utf8_lossy(&rest).split('\n').map(String::from).collect())
+    }
+}
+
 /// FNV-1a, 64 bits. Fixed by definition, unlike the standard library's
 /// hasher, so a hash written by one build still means the same to the next.
 fn fnv(bytes: &[u8]) -> u64 {
@@ -988,6 +1011,17 @@ pub struct Lane {
     /// when nobody knows, and the history then writes nothing for the lane
     /// rather than date it to the pass.
     pub fetched_at: f64,
+    /// On a balance with a dated grant: what the grant(s) expiring at
+    /// `reset` still hold, in `unit`. `None` when the provider does not say
+    /// - never zero for unknown. The history caps a lapse at it, so a partly
+    /// spent grant expiring beside spend is not read as its whole amount
+    /// gone (`history::overage::balance_moves`). Perplexity fills it.
+    pub grant_left: Option<f64>,
+    /// Beside [`Lane::grant_left`]: what those grants were granted, in
+    /// `unit`. A ceiling falling by more than this lost another grant too,
+    /// one whose expiry no reading stated, and its remainder is expiry, not
+    /// spend. `None` when the provider does not say.
+    pub grant_total: Option<f64>,
 }
 
 /// What a lane's amounts are counted in.

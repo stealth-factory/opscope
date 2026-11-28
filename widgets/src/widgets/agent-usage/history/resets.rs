@@ -759,6 +759,8 @@ mod tests {
             reset_at: reset,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
+            grant_total: None,
         }
     }
 

@@ -1964,7 +1964,14 @@ mix. A provider that sends no account id (Antigravity, Perplexity) is kept
 under the configured profile instead, or the default one, so two accounts
 signed in one after the other under the same profile share that profile's
 history. On the unified Cursor and Grok plan the history is kept under
-SpaceXSI as well as under each product.
+SpaceXSI as well as under each product. While Grok is on the plan alone its
+SpaceXSI history is kept under Grok's account; the first time the two share
+it, that history moves into the shared plan's, and it is never moved back,
+because the shared history cannot say which of its readings were taken alone.
+A Copilot reading that comes without an account id - the id arrives with the
+live answer, so a reading during an outage has none - is filed under the
+account last seen, unless the credential says it was signed in as someone else
+since: then it is not recorded at all.
 
 From the readings it works out each cycle: where it began and ended, whether
 the next began where the last ended or at first use after a gap, how much of
@@ -2047,12 +2054,59 @@ goes:
   no cycle, so its chart is spend per calendar month, and says so. A
   balance that falls across a grant's stated expiry - a Perplexity bonus
   lapsing beside another - counts the fall as expired, not spent, up to
-  what the lapsed grant held; anything past that is still spend. A pool
+  what the lapsed grant held; anything past that is still spend. Where the
+  pool's total fell by more than that grant was granted, another lapsed in
+  the same stretch without a reading saying when, and what it could have
+  held is expiry too, never spend. A pool
   read live as empty is recorded too, so the last grant lapsing is expiry
   rather than a gap, and a pool that has only ever been empty draws no
   chart. Cursor's
   prepaid credit, Codex, Devin and Droid state no grant expiries, so their
   falls are all spend.
+- **Cursor's additional usage on the unified plan is recorded from the
+  usage call's first answer.** The prepaid call can state the month's spend
+  sooner, but only the usage answer says whether the month has a limit, and
+  the history stores an unknown limit the same way as no limit. So spend read
+  before that first answer is not written, rather than written as a month
+  whose cap was removed.
+- **A Grok figure from the CLI's log is written only if it is newer than
+  `~/.grok/auth.json`.** The log does not say which account a line belongs
+  to, and every sign-in rewrites that file, so an older line could be the
+  previous account's. A token refresh rewrites it too, so this sometimes
+  leaves out a line that was in fact this account's; it never files one
+  account's quota under another. The tab still shows the log's figure. A
+  billing answer that took its percentage from such a line is written
+  without the percentage.
+- **When local work could have drawn it.** Spend seen only after a gap is
+  known to the gap: "somewhere in these 20 hours". For Claude's extra usage
+  and Codex credits, the newest three such stretches an hour or longer,
+  spent while an allowance was used up, get a line naming the turns this
+  machine's own agent made inside them:
+  `A$4.10 spent Tue 18 Nov 12:00–Wed 19 Nov 08:00; local turns in this
+  bracket: Tue 18 Nov 14:00–16:10 (Claude Code, 23 turns)`. That is activity,
+  never an amount: the figure is the stretch's own, nothing divides it among
+  the turns, and spend from another device or the web app is invisible to it,
+  which is why it says *local*. Only the provider's own agent counts - Claude
+  Code transcripts under the account's config dirs, Codex rollouts whose
+  session names the account - and a provider with no local agent gets no
+  line. A stretch with no local turns says nothing rather than "no local
+  turns": Claude Code deletes old transcripts, and a log that is gone reads
+  exactly like an idle machine. The logs are read on a thread of their own,
+  only those written since the stretch began. A Claude transcript is read
+  only for the part that covers the stretch; a Codex rollout is read from
+  its first line, because whose its turns are is the latest session header
+  above them, which can sit anywhere in the file, so a long rollout costs
+  its whole length up to the end of the stretch. A config dir counts only
+  for stretches that began after it was signed in as the account, and one
+  whose sign-in was never dated counts in none before the next pass dates
+  it. What a stretch's read finds is kept while a tab shows it and for ten
+  minutes after, and is not read again while its log directories stay the
+  same; a directory the
+  read did not cover - another config dir signed in as the account - reads
+  it again. A stretch whose read did not finish says nothing: one cut short
+  because another stretch spent the reading budget, or because the listing
+  of its logs was, is read again on a later pass; one too large for the
+  whole budget, or whose log failed part-way, stays unsaid.
 
 A wider pane shows more cycles; a narrower one fewer, and nothing is cut. A
 file written by a newer opscope is left alone and the section says so in one

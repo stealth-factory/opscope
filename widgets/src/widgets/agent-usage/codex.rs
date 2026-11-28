@@ -316,6 +316,16 @@ pub struct RolloutLines {
     model: String,
     tier: String,
     pub records: Records,
+    /// The account the latest `session_meta` read so far names: the one
+    /// whose quota the lines after it carry. `None` before one, or when
+    /// it names nobody.
+    who: Option<String>,
+    /// Whether `who` and `limits` cover every line read. False for a
+    /// reader restored from a store written before they were kept, which
+    /// cannot say whose a snapshot is (OPS-309).
+    accounts_known: bool,
+    /// The newest snapshot of the main limit read for each account.
+    limits: HashMap<String, Snapshot>,
 }
 
 impl RolloutLines {
@@ -325,6 +335,9 @@ impl RolloutLines {
             model: String::new(),
             tier: String::new(),
             records: HashMap::new(),
+            who: None,
+            accounts_known: true,
+            limits: HashMap::new(),
         }
     }
 }
@@ -332,18 +345,43 @@ impl RolloutLines {
 impl Persist for RolloutLines {
     /// The session id, model and tier it carries, and the records keyed by
     /// session and timestamp: identifiers and counts, nothing that was said.
+    /// The quota snapshots are percentages, windows and reset times.
     fn meta(&self) -> serde_json::Value {
-        serde_json::json!({"session": self.session, "model": self.model, "tier": self.tier})
+        let mut v = serde_json::json!({"session": self.session, "model": self.model, "tier": self.tier});
+        if self.accounts_known {
+            let limits: serde_json::Map<String, serde_json::Value> = self
+                .limits
+                .iter()
+                .map(|(who, s)| (who.clone(), serde_json::json!({"limits": s.limits, "at": s.at})))
+                .collect();
+            v["who"] = serde_json::json!(self.who);
+            v["limits"] = serde_json::Value::Object(limits);
+        }
+        v
     }
     fn records(&self) -> Option<&Records> {
         Some(&self.records)
     }
+    /// A store from before the accounts were kept still restores the
+    /// records, so the totals are not read again; it only cannot vouch for
+    /// whose quota the lines already read carried.
     fn load(v: &serde_json::Value, records: Records) -> Option<RolloutLines> {
+        let limits: Option<HashMap<String, Snapshot>> = v["limits"].as_object().map(|m| {
+            m.iter()
+                .filter_map(|(who, s)| {
+                    let at = s["at"].as_f64()?;
+                    s["limits"].is_object().then(|| (who.clone(), Snapshot { limits: s["limits"].clone(), at }))
+                })
+                .collect()
+        });
         Some(RolloutLines {
             session: v["session"].as_str()?.to_string(),
             model: v["model"].as_str()?.to_string(),
             tier: v["tier"].as_str()?.to_string(),
             records,
+            who: v["who"].as_str().map(str::to_string),
+            accounts_known: limits.is_some(),
+            limits: limits.unwrap_or_default(),
         })
     }
 }
@@ -367,6 +405,14 @@ impl Lines for RolloutLines {
                 if !id.is_empty() {
                     self.session = id;
                 }
+                self.who = creator(payload);
+                // Whose every line after a header is, is known again, even
+                // for a reader restored without the accounts. Nothing from
+                // before it is vouched for: those snapshots stay unread.
+                if !self.accounts_known {
+                    self.limits.clear();
+                    self.accounts_known = true;
+                }
                 return;
             }
             "turn_context" => {
@@ -384,7 +430,13 @@ impl Lines for RolloutLines {
             }
             _ => {}
         }
-        if text(payload, "type") != "token_count" || self.model.is_empty() {
+        if text(payload, "type") != "token_count" {
+            return;
+        }
+        if let (Some(who), Some(snap)) = (&self.who, main_limit(&r)) {
+            self.limits.insert(who.clone(), snap);
+        }
+        if self.model.is_empty() {
             return;
         }
         let used = &payload["info"]["last_token_usage"];
@@ -569,81 +621,87 @@ pub struct Snapshot {
     pub at: f64,
 }
 
-/// How much of a rollout's first line is read for its `session_meta`.
-const HEAD: u64 = 1024 * 1024;
-
-/// A file's first line, up to [`HEAD`] bytes; `None` when it is longer.
-fn first_line(path: &str) -> Option<String> {
-    use std::io::{BufRead, Read};
-    let f = std::fs::File::open(path).ok()?;
-    let mut buf = Vec::new();
-    std::io::BufReader::new(f.take(HEAD)).read_until(b'\n', &mut buf).ok()?;
-    buf.ends_with(b"\n").then(|| String::from_utf8_lossy(&buf).into_owned())
+/// The account a `session_meta` payload names, as the backfill reads it.
+fn creator(payload: &serde_json::Value) -> Option<String> {
+    payload["creator_account_id"].as_str().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
-/// The newest snapshot of the main limit in one rollout, from a session of
-/// `account_id`'s: `head` is the rollout's first line, where Codex writes
-/// the `session_meta` naming the account that created the session, and
-/// `tail` its last lines. A metered feature's own limit (`codex_spark`) is
-/// not the account's primary window, and a session that names no account,
-/// or another one, says nothing about this account's.
-pub fn parse_snapshot(head: Option<&str>, tail: &[String], account_id: &str) -> Option<Snapshot> {
-    use crate::history::backfill::{RolloutLine, parse_rollout_line};
-    let meta = |line: &str| match parse_rollout_line(line) {
-        RolloutLine::Meta(who) => Some(who),
-        _ => None,
+/// The main limit one rollout line carries, dated when Codex read it. A
+/// metered feature's own limit (`codex_spark`) is not the account's
+/// primary window.
+fn main_limit(d: &serde_json::Value) -> Option<Snapshot> {
+    let payload = &d["payload"];
+    let limits = match payload["rate_limits"].is_object() {
+        true => &payload["rate_limits"],
+        false => &payload["info"]["rate_limits"],
     };
-    let mut who: Option<String> = head.and_then(meta).flatten();
+    // Rollouts from before `limit_id` existed are the main limit.
+    if !limits.is_object() || limits["limit_id"].as_str().unwrap_or("codex") != "codex" {
+        return None;
+    }
+    let at = iso_epoch(&text(d, "timestamp"))?;
+    Some(Snapshot { limits: limits.clone(), at })
+}
+
+/// The newest snapshot of `account_id`'s main limit in `lines`, read in
+/// file order from a point where the latest `session_meta` named `who`.
+/// A session that names no account, or another one, says nothing about
+/// this account's. Every line from that point must be here: a
+/// `session_meta` in a stretch left unread changes whose the snapshots
+/// after it are.
+pub fn parse_snapshot(mut who: Option<String>, lines: &[String], account_id: &str) -> Option<Snapshot> {
     let mut found = None;
-    for line in tail {
-        if line.contains("\"session_meta\"") {
-            if let Some(w) = meta(line) {
-                who = w;
-            }
-            continue;
-        }
-        if !line.contains("\"rate_limits\"") {
+    for line in lines {
+        if !line.contains("\"session_meta\"") && !line.contains("\"rate_limits\"") {
             continue;
         }
         let Ok(d) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        let payload = &d["payload"];
-        let limits = match payload["rate_limits"].is_object() {
-            true => &payload["rate_limits"],
-            false => &payload["info"]["rate_limits"],
-        };
-        // Rollouts from before `limit_id` existed are the main limit.
-        if !limits.is_object() || limits["limit_id"].as_str().unwrap_or("codex") != "codex" {
+        if d["type"].as_str() == Some("session_meta") {
+            who = creator(&d["payload"]);
             continue;
         }
-        let Some(at) = iso_epoch(&text(&d, "timestamp")) else {
-            continue;
-        };
         if who.as_deref() == Some(account_id) {
-            found = Some(Snapshot { limits: limits.clone(), at });
+            found = main_limit(&d).or(found);
         }
     }
     found
+}
+
+/// A whole rollout as lines, when it is no longer than [`TAIL`].
+fn whole_if_short(path: &str) -> Option<Vec<String>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(TAIL + 1).read_to_end(&mut buf).ok()?;
+    (buf.len() as u64 <= TAIL).then(|| String::from_utf8_lossy(&buf).split('\n').map(String::from).collect())
 }
 
 /// The newest rate_limits snapshot of this account's main limit on disk.
 ///
 /// The server returns the account's windows with each response and the
 /// rollout writes them down, so the last one in the newest file is the
-/// freshest thing here. Only the tail is read, and the first line for the
-/// session's account: this is the fallback for a failed live call, and
-/// re-reading every rollout in full to find a number that is repeated at
-/// the end of one of them would be daft. With no account id there is no
+/// freshest thing here. This is the fallback for a failed live call, so it
+/// reads only what it must: a rollout no longer than [`TAIL`] in full, and
+/// a longer one as the rollout reader's own account state plus what was
+/// appended since that reader last caught up with it. Whose a snapshot is
+/// depends on the latest `session_meta` before it, which can sit anywhere
+/// in the file, so a long rollout the reader is not caught up with is
+/// passed over rather than read from its two ends, which could file one
+/// account's quota under another (OPS-309). With no account id there is no
 /// telling whose a snapshot is, and none is used.
-fn newest_limits(files: &[String], account_id: &str) -> Option<Snapshot> {
+fn newest_limits(files: &[String], account_id: &str, tails: &HashMap<String, Tail<RolloutLines>>) -> Option<Snapshot> {
     if account_id.is_empty() {
         return None;
     }
-    files
-        .iter()
-        .take(SNAPSHOT_FILES)
-        .find_map(|path| parse_snapshot(first_line(path).as_deref(), &tail_lines(path, TAIL), account_id))
+    files.iter().take(SNAPSHOT_FILES).find_map(|path| {
+        if let Some(lines) = whole_if_short(path) {
+            return parse_snapshot(None, &lines, account_id);
+        }
+        let t = tails.get(path.as_str()).filter(|t| t.parser.accounts_known)?;
+        let rest = t.appended(path, TAIL)?;
+        parse_snapshot(t.parser.who.clone(), &rest, account_id).or_else(|| t.parser.limits.get(account_id).cloned())
+    })
 }
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
@@ -737,15 +795,16 @@ pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     codex.ok = true;
     codex.files = files.len();
     codex.last = listed[0].mtime as f64;
-    // The quota fallback reads the newest rollout's tail on every pass:
-    // it stands in for a live call that failed this pass, not for history.
-    let snapshot = newest_limits(&files, &codex.account_id);
-    codex.limits_at = snapshot.as_ref().map_or(0.0, |s| s.at);
-    codex.limits = snapshot.map(|s| s.limits);
     let asked = caches.readings.asked_at > 0.0;
     let pass = caches
         .rollouts
         .pass((listed, complete), asked, at, &mut caches.budget, rollout_reader);
+    // The quota fallback reads the newest rollouts' ends on every pass: it
+    // stands in for a live call that failed this pass, not for history.
+    // After the pass, so it starts from where the rollout reader got to.
+    let snapshot = newest_limits(&files, &codex.account_id, &caches.rollouts.tails);
+    codex.limits_at = snapshot.as_ref().map_or(0.0, |s| s.at);
+    codex.limits = snapshot.map(|s| s.limits);
     codex.history = caches.rollouts.history.clone();
     if pass == Pass::Held {
         if let Some(built) = &caches.codex_built {
@@ -2129,6 +2188,86 @@ mod tests {
     }
 
     #[test]
+    fn an_account_switch_in_the_unread_middle_of_a_rollout_is_never_filed_under_the_first() {
+        // OPS-309 item 2: the first line names acct-A, a session_meta for
+        // acct-B sits in the middle, and the tail holds a snapshot with no
+        // session_meta of its own. Reading the head and the tail alone filed
+        // B's quota under A.
+        let dir = std::env::temp_dir().join(format!("opscope-codex-switch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = |who: &str| {
+            format!(r#"{{"timestamp":"2026-10-01T00:00:00Z","type":"session_meta","payload":{{"id":"s","creator_account_id":"{who}"}}}}"#)
+        };
+        let main = r#"{"timestamp":"2026-10-01T01:00:00Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"limit_id":"codex","primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1000}}}}"#;
+        let filler = format!(
+            r#"{{"timestamp":"2026-10-01T00:30:00Z","type":"response_item","payload":{{"text":"{}"}}}}"#,
+            "x".repeat(1000)
+        );
+        let mut body = format!("{}\n{}\n", meta("acct-A"), meta("acct-B"));
+        while (body.len() as u64) < 2 * TAIL {
+            body.push_str(&filler);
+            body.push('\n');
+        }
+        body.push_str(main);
+        body.push('\n');
+        let path = dir.join("switch.jsonl");
+        std::fs::write(&path, &body).unwrap();
+        let files = vec![path.to_string_lossy().into_owned()];
+        // Not read through yet: the middle is unknown, so neither account
+        // gets the snapshot.
+        let mut tails = HashMap::new();
+        assert!(newest_limits(&files, "acct-A", &tails).is_none(), "B's quota filed under A");
+        assert!(newest_limits(&files, "acct-B", &tails).is_none(), "an unread middle vouched for");
+        // Once the rollout reader has been through it, the switch is known.
+        assert!(follow(&mut tails, &files[0], || rollout_reader(&files[0])));
+        assert!(newest_limits(&files, "acct-A", &tails).is_none());
+        let held = newest_limits(&files, "acct-B", &tails).expect("B's snapshot");
+        assert_eq!(held.limits["primary"]["used_percent"], 26.0);
+        // Appended since the reader caught up: read from where it stopped,
+        // still B's, and the newer one wins.
+        let newer = main.replace("26.0", "31.0").replace("01:00:00Z", "02:00:00Z");
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        std::io::Write::write_all(&mut f, format!("{newer}\n").as_bytes()).unwrap();
+        let snap = newest_limits(&files, "acct-B", &tails).expect("the appended snapshot");
+        assert_eq!(snap.limits["primary"]["used_percent"], 31.0);
+        // A switch back to A in the appended part moves what follows to A.
+        let back = format!("{}\n{}\n", meta("acct-A"), newer.replace("31.0", "40.0"));
+        std::io::Write::write_all(&mut f, back.as_bytes()).unwrap();
+        drop(f);
+        let a = newest_limits(&files, "acct-A", &tails).expect("A's");
+        assert_eq!(a.limits["primary"]["used_percent"], 40.0);
+        let b = newest_limits(&files, "acct-B", &tails).expect("B's");
+        assert_eq!(b.limits["primary"]["used_percent"], 31.0);
+        // A reader restored from a store that kept no accounts vouches for
+        // nobody, and the state it does keep survives a store round trip.
+        let t = tails.get_mut(&files[0]).unwrap();
+        let restored = RolloutLines::load(&t.parser.meta(), HashMap::new()).unwrap();
+        assert_eq!(restored.who.as_deref(), Some("acct-B"));
+        assert_eq!(restored.limits["acct-B"].limits["primary"]["used_percent"], 26.0);
+        let mut old = t.parser.meta();
+        old.as_object_mut().unwrap().remove("limits");
+        old.as_object_mut().unwrap().remove("who");
+        t.parser = RolloutLines::load(&old, HashMap::new()).unwrap();
+        assert!(newest_limits(&files, "acct-A", &tails).is_none());
+        // Review on OPS-309: a header read after that restore says whose
+        // every line after it is, and the reader went on vouching for
+        // nobody for as long as the rollout lived.
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let resumed = format!("{}\n{}\n", meta("acct-A"), newer.replace("31.0", "45.0").replace("02:00:00Z", "03:00:00Z"));
+        std::io::Write::write_all(&mut f, resumed.as_bytes()).unwrap();
+        drop(f);
+        assert!(follow(&mut tails, &files[0], || rollout_reader(&files[0])));
+        let a = newest_limits(&files, "acct-A", &tails).expect("A's, after the header");
+        assert_eq!(a.limits["primary"]["used_percent"], 45.0);
+        // What only the unread prefix held stays unvouched for.
+        assert!(newest_limits(&files, "acct-B", &tails).is_none());
+        let kept = tails[&files[0]].parser.meta();
+        assert_eq!(kept["who"], "acct-A");
+        assert_eq!(kept["limits"]["acct-A"]["limits"]["primary"]["used_percent"], 45.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_snapshot_fallback_reads_the_main_limit_of_this_accounts_sessions_at_its_own_time() {
         let dir = std::env::temp_dir().join(format!("opscope-codex-snapshot-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2144,7 +2283,7 @@ mod tests {
         let ours = dir.join("a.jsonl");
         std::fs::write(&ours, format!("{}\n{main}\n{spark}\n", meta("acct-A"))).unwrap();
         let files = vec![other.to_string_lossy().into_owned(), ours.to_string_lossy().into_owned()];
-        let snap = newest_limits(&files, "acct-A").expect("a snapshot");
+        let snap = newest_limits(&files, "acct-A", &HashMap::new()).expect("a snapshot");
         assert_eq!(snap.limits["limit_id"], "codex");
         assert_eq!(snap.limits["primary"]["used_percent"], 26.0);
         assert_eq!(snap.at, crate::iso_epoch("2026-10-01T01:00:00Z").unwrap());
@@ -2157,7 +2296,7 @@ mod tests {
         };
         assert_eq!(lanes(&d)[0].fetched_at, snap.at);
         // No session of this account's: nothing to stand in for it.
-        assert!(newest_limits(&files[..1], "acct-A").is_none());
+        assert!(newest_limits(&files[..1], "acct-A", &HashMap::new()).is_none());
     }
 
     #[test]

@@ -30,6 +30,41 @@
 //! * a file SQLite calls damaged is **renamed** `.damaged-<epoch>`, never
 //!   deleted, and [`History::notice`] says so.
 //!
+//! ## Schema versions
+//!
+//! * **v1** ([`V1`]): every table, spec §3.6.
+//! * **v2** ([`V2`], OPS-309): four nullable columns, nothing else. Raw
+//!   samples are never rewritten: a v1 file keeps every row as it was, and
+//!   all four read `NULL` on rows written before the migration, where
+//!   each reader falls back to the v1 rule. So the derived tables fold the
+//!   same from a migrated file and the migration re-folds nothing.
+//!   - `sample.grant_left REAL`: on a balance sample, what the grant whose
+//!     expiry is the sample's `reset_at` (the soonest dated one) still held,
+//!     in the pool's unit, summed when several grants share that expiry.
+//!     Generic: any provider that states a per-grant remainder fills it
+//!     through [`Lane::grant_left`]; today only Perplexity does
+//!     (`remaining_cents`). `NULL` is unstated - an old sample, a provider
+//!     that does not say, or a grant among those that did not say - never
+//!     zero. [`overage::balance_moves`] caps a lapse at it.
+//!   - `sample.grant_total REAL`: beside `grant_left`, what those grants
+//!     were granted, from the same source (Perplexity's `amount_cents`).
+//!     A ceiling that fell by more than it lost another grant as well, one
+//!     whose expiry no reading stated, so [`overage::balance_moves`] counts
+//!     up to that grant's amount more as expiry rather than spend. `NULL` is
+//!     unstated, and the cap is then `grant_left`'s alone, as before it.
+//!   - `pool.last_pct REAL`: the percentage of the live answer `last_seen`
+//!     is the time of - set with it, on every live answer, written as a
+//!     sample or held back as unchanged - so the idle check in [`gone_at`]
+//!     reads the same answer the absence is timed from. `NULL` on a pool not
+//!     answered live since the migration, or whose answer had no finite
+//!     percentage; [`gone_at`] then reads the last live sample, as v1 did.
+//!   - `pool.last_pct_at REAL`: the `last_seen` that `last_pct` was set
+//!     with. A pane on an older build, opened before the migration, goes
+//!     on moving `last_seen` without `last_pct`, so the two can come apart;
+//!     [`gone_at`] trusts `last_pct` only while `last_pct_at = last_seen`,
+//!     and otherwise reads the last live sample, as v1 did. `NULL` on a
+//!     pool not answered live since the migration.
+//!
 //! Every write ([`History::record`]) is one `BEGIN IMMEDIATE` transaction
 //! that reads the previous state from the file, not from this pane's
 //! memory, so two panes cannot both open a cycle; the unique keys back
@@ -65,7 +100,7 @@ const SPACEXSI_HEADING: &str = crate::shared::SPACEXSI;
 
 /// Migration `n` (from 0) takes the file from `user_version = n` to `n + 1`.
 /// Forward only: never edit one that has shipped, add the next.
-pub const MIGRATIONS: &[&str] = &[V1];
+pub const MIGRATIONS: &[&str] = &[V1, V2];
 
 /// Schema v1, spec §3.6: every table, the derived ones phases 2 to 5 fill
 /// included, so the schema does not change between phases.
@@ -208,6 +243,15 @@ CREATE TABLE overage_span (
   exhausted   TEXT NOT NULL,
   PRIMARY KEY (overage_id, at_hi)
 );
+";
+
+/// Schema v2 (OPS-309): see the module doc. Nullable columns only, so old
+/// rows read `NULL` - unstated - and are not rewritten.
+const V2: &str = "
+ALTER TABLE sample ADD COLUMN grant_left REAL;
+ALTER TABLE sample ADD COLUMN grant_total REAL;
+ALTER TABLE pool ADD COLUMN last_pct REAL;
+ALTER TABLE pool ADD COLUMN last_pct_at REAL;
 ";
 
 /// Where the history lives.
@@ -528,13 +572,44 @@ impl History {
     /// The key the unified plan's copy of `o` is kept under. See
     /// [`spacexsi_key`].
     pub fn spacexsi_key_of(&self, o: &Observation) -> Option<String> {
-        let own = self.account_key_of(o);
+        let own = self.account_key_of(o)?;
         spacexsi_key(&self.conn, o, &own).ok().flatten()
     }
 
-    /// The key `o` is stored under. See [`key_of`].
-    pub fn account_key_of(&self, o: &Observation) -> String {
-        key_of(&self.conn, o).unwrap_or_else(|_| o.account_key())
+    /// The key `o` is stored under, or `None` when it is filed under no
+    /// account. See [`key_of`].
+    pub fn account_key_of(&self, o: &Observation) -> Option<String> {
+        key_of(&self.conn, o).unwrap_or_else(|_| Some(o.account_key()))
+    }
+
+    /// Since when `o`'s profile - one config dir - has been signed in as
+    /// `account_key`, as far as this history knows: the first pass that saw
+    /// it so ([`account_since`]). A profile with no account id of its own
+    /// is filed under itself, so it has been since the account was first
+    /// seen. `None` when the profile was last seen as another account, the
+    /// account is not stored, or when it changed was never recorded (a file
+    /// from before it was kept): nothing of the profile's is known to be
+    /// the account's then. The account's own first sighting is no answer,
+    /// since another profile may have made it while this one was someone
+    /// else's (review on OPS-309); the next pass records one instead.
+    pub fn signed_in_since(&self, o: &Observation, account_key: &str) -> Option<f64> {
+        match meta_read(&self.conn, &last_account(o)).ok()? {
+            Some(last) if last != account_key => return None,
+            Some(_) => {
+                return meta_read(&self.conn, &account_since(o)).ok()?.and_then(|v| v.parse::<f64>().ok());
+            }
+            None if o.has_stable_id() => return None,
+            None => {}
+        }
+        self.conn
+            .query_row(
+                "SELECT first_seen FROM account WHERE provider = ?1 AND account_key = ?2",
+                params![o.provider, account_key],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
     }
 
     /// The first sample of any pool of one account, or `None` when it has
@@ -585,9 +660,27 @@ impl History {
         // answered live: the evidence `pool_gone` needs.
         let mut answered: Vec<(i64, Vec<String>)> = Vec::new();
         for o in obs {
-            let key = key_of(&tx, o)?;
-            if o.has_stable_id() && meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
-                meta_set(&tx, &last_account(o), &key)?;
+            // A pass with no id whose credential names someone else: the
+            // live display keeps it, the history files nothing.
+            let Some(key) = key_of(&tx, o)? else {
+                continue;
+            };
+            if o.has_stable_id() {
+                if meta_get(&tx, &last_account(o))?.as_deref() != Some(&*key) {
+                    meta_set(&tx, &last_account(o), &key)?;
+                    // When this profile was first seen signed in as it, so
+                    // its local logs are not given to it from before.
+                    meta_set(&tx, &account_since(o), &now.to_string())?;
+                } else if meta_get(&tx, &account_since(o))?.is_none() {
+                    // Signed in as it since before the file kept when: from
+                    // here on is all that is known.
+                    meta_set(&tx, &account_since(o), &now.to_string())?;
+                }
+                // Beside it, whose the credential was on the same pass: what
+                // an id-less pass is compared with.
+                if meta_get(&tx, &last_signer(o))?.as_deref() != Some(o.signer.as_str()) {
+                    meta_set(&tx, &last_signer(o), &o.signer)?;
+                }
             }
             let account = upsert_account(&tx, &o.provider, &key, &o.heading, now)?;
             // Where a shared plan was keyed this pass, remember it for a
@@ -598,6 +691,25 @@ impl History {
                 }
             }
             let spacexsi_account = spacexsi_key(&tx, o, &key)?;
+            // Grok on the plan by itself kept SpaceXSI's history under its
+            // own key; sharing with Cursor keys it by Cursor's. The first
+            // pass that shares moves the one into the other (OPS-309).
+            if o.provider == "grok" {
+                match (o.spacexsi, &spacexsi_account) {
+                    (Some(Spacexsi::Shared), Some(sk)) => {
+                        // A held-back reading under a pool the merge deleted
+                        // must not be bridged into a pool given its id later.
+                        for gone in merge_alone_into_shared(&tx, "grok", &key, sk, now, &mut refold, &mut banks_changed)? {
+                            seen.retain(|(id, _), _| *id != gone);
+                        }
+                    }
+                    (Some(Spacexsi::Alone | Spacexsi::Separate), _) => {
+                        tx.execute("DELETE FROM meta WHERE k = ?1", [merged_key("grok", &key)])
+                            .map_err(sql)?;
+                    }
+                    _ => {}
+                }
+            }
             let sx = o.spacexsi.map(super::spacexsi_name);
             write_lanes(&tx, account, &o.lanes, sx, seen, t.watch_gap_secs, &mut refold)?;
             let live: Vec<String> = o
@@ -783,11 +895,15 @@ impl History {
         let account = upsert_account(&tx, provider, account_key, heading, now)?;
         let mut refold: Vec<(i64, f64)> = Vec::new();
         for r in rows {
+            // A replayed row is a reading of the pool at its own time, so
+            // where it moves `last_seen` the percentage beside it is its
+            // own; a row with none leaves `last_pct` unstated, never 0.
             let lane = Lane {
                 label: r.label.clone(),
                 pool_key: r.pool_key.clone(),
                 unit: r.unit.clone(),
                 role: r.role,
+                pct: r.sample.pct.unwrap_or(f64::NAN),
                 ..Lane::default()
             };
             let pool = upsert_pool(&tx, account, &lane, r.sample.at)?;
@@ -870,22 +986,54 @@ fn last_account(o: &Observation) -> String {
     format!("last_account:{}:{profile}", o.provider)
 }
 
+/// The `meta` key holding when [`last_account`] was last set: the first
+/// pass that saw the profile signed in as the account it names.
+fn account_since(o: &Observation) -> String {
+    let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
+    format!("account_since:{}:{profile}", o.provider)
+}
+
+/// The `meta` key holding [`Observation::signer`] as it was on the pass
+/// that last set [`last_account`].
+fn last_signer(o: &Observation) -> String {
+    let profile = if o.profile.is_empty() { "default" } else { o.profile.as_str() };
+    format!("last_signer:{}:{profile}", o.provider)
+}
+
+fn meta_read(c: &Connection, k: &str) -> Result<Option<String>, String> {
+    c.query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [k], |r| r.get(0))
+        .optional()
+        .map(Option::flatten)
+        .map_err(sql)
+}
+
 /// The key `o` is stored under: its own stable id where it has one. Where it
 /// has none - a provider whose id comes in the live body, during an outage -
 /// the account this provider's profile was last seen under, so the outage's
 /// watch state lands on that account rather than on a `profile:` account
 /// nobody has. Never invented: a provider never seen with an id keeps the
 /// profile key it always had.
-fn key_of(c: &Connection, o: &Observation) -> Result<String, String> {
+///
+/// `None` - filed under no account - when the credential itself says it is
+/// someone else's now: a signer that differs from the one seen beside the
+/// last stable id. Only a stated signer on both sides can say so; where
+/// either is empty the two cannot be compared, and the last account seen
+/// stands, as it does for a provider whose credential names nobody (OPS-309).
+fn key_of(c: &Connection, o: &Observation) -> Result<Option<String>, String> {
     if o.has_stable_id() {
-        return Ok(o.account_key());
+        return Ok(Some(o.account_key()));
     }
-    let last: Option<String> = c
-        .query_row("SELECT CAST(v AS TEXT) FROM meta WHERE k = ?1", [last_account(o)], |r| r.get(0))
-        .optional()
-        .map(Option::flatten)
-        .map_err(sql)?;
-    Ok(last.unwrap_or_else(|| o.account_key()))
+    let Some(last) = meta_read(c, &last_account(o))? else {
+        return Ok(Some(o.account_key()));
+    };
+    if !o.signer.is_empty() {
+        if let Some(was) = meta_read(c, &last_signer(o))?.filter(|w| !w.is_empty()) {
+            if was != o.signer {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(Some(last))
 }
 
 /// The `meta` key holding the unified plan's key a vendor account shared
@@ -906,6 +1054,161 @@ fn spacexsi_key(c: &Connection, o: &Observation, own: &str) -> Result<Option<Str
         .optional()
         .map(Option::flatten)
         .map_err(sql)
+}
+
+/// The `meta` key recording that a vendor account's SpaceXSI history under
+/// its own key was moved into the shared plan's, and into which.
+fn merged_key(provider: &str, alone: &str) -> String {
+    format!("spacexsi_merged:{provider}:{alone}")
+}
+
+/// Move the unified plan's history a vendor kept under its own key - while
+/// it was on the plan `Alone` (or `Separate`) - into the key the plan is
+/// `Shared` under now, so the plan keeps one history (OPS-309).
+///
+/// Runs inside the pass's transaction, so two panes racing it move it once:
+/// the second finds [`merged_key`] already naming `shared` and does
+/// nothing. Raw rows are moved, never altered: a pool of the same key
+/// merges into the shared one, where a sample at an instant the shared pool
+/// already holds is the one row not moved (the primary key decides, and the
+/// two are one reading of one plan); any other pool is re-parented whole.
+/// Bank and watch rows move the same way. A plan row is one vendor's tier,
+/// so one at an instant the shared account already holds for the other
+/// vendor goes in the next instant, as [`write_unified_plan`] places two
+/// read together; only the same row met again is dropped. The derived rows of a pool
+/// that merged are dropped with it, and every pool the move touched is
+/// folded again from its first sample, as are the account's bank events.
+///
+/// Leaving the shared plan forgets the record, so a later `Alone` stretch
+/// moves over in its turn when the two share again. Nothing is ever moved
+/// back: the shared pool cannot say which of its readings were taken alone.
+///
+/// Returns the ids of the pools it deleted, whose ids SQLite may give to a
+/// pool made later.
+fn merge_alone_into_shared(
+    tx: &Transaction,
+    provider: &str,
+    alone: &str,
+    shared: &str,
+    now: f64,
+    refold: &mut Vec<(i64, f64)>,
+    banks_changed: &mut Vec<i64>,
+) -> Result<Vec<i64>, String> {
+    let mk = merged_key(provider, alone);
+    let mut deleted = Vec::new();
+    if alone == shared || meta_get(tx, &mk)?.as_deref() == Some(shared) {
+        return Ok(deleted);
+    }
+    let src: Option<(i64, f64, f64)> = tx
+        .query_row(
+            "SELECT id, first_seen, last_seen FROM account WHERE provider = 'spacexsi' AND account_key = ?1",
+            [alone],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some((src, first, last)) = src {
+        let dst = upsert_account(tx, "spacexsi", shared, SPACEXSI_HEADING, now)?;
+        tx.execute(
+            "UPDATE account SET first_seen = MIN(first_seen, ?2), last_seen = MAX(last_seen, ?3) WHERE id = ?1",
+            params![dst, first, last],
+        )
+        .map_err(sql)?;
+        let pools: Vec<(i64, String)> = {
+            let mut st = tx.prepare("SELECT id, pool_key FROM pool WHERE account_id = ?1").map_err(sql)?;
+            let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?))).map_err(sql)?;
+            rows.collect::<Result<_, _>>().map_err(sql)?
+        };
+        for (from, pool_key) in pools {
+            let Some(into) = pool_id(tx, dst, &pool_key)? else {
+                tx.execute("UPDATE pool SET account_id = ?2 WHERE id = ?1", params![from, dst])
+                    .map_err(sql)?;
+                refold.push((from, f64::NEG_INFINITY));
+                continue;
+            };
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS})
+                     SELECT ?2, {SAMPLE_COLS} FROM sample WHERE pool_id = ?1"
+                ),
+                params![from, into],
+            )
+            .map_err(sql)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO overage_event(overage_id, event_key, at, amount, model)
+                 SELECT ?2, event_key, at, amount, model FROM overage_event WHERE overage_id = ?1",
+                params![from, into],
+            )
+            .map_err(sql)?;
+            tx.execute("UPDATE OR IGNORE pool_link SET overage_id = ?2 WHERE overage_id = ?1", params![from, into])
+                .map_err(sql)?;
+            tx.execute("UPDATE OR IGNORE pool_link SET included_id = ?2 WHERE included_id = ?1", params![from, into])
+                .map_err(sql)?;
+            // The liveness `gone_at` reads: whichever pool answered last.
+            tx.execute(
+                "UPDATE pool SET first_seen = MIN(first_seen, (SELECT first_seen FROM pool WHERE id = ?1)),
+                     last_pct = CASE WHEN (SELECT last_seen FROM pool WHERE id = ?1) > last_seen
+                                     THEN (SELECT last_pct FROM pool WHERE id = ?1) ELSE last_pct END,
+                     last_pct_at = CASE WHEN (SELECT last_seen FROM pool WHERE id = ?1) > last_seen
+                                        THEN (SELECT last_pct_at FROM pool WHERE id = ?1) ELSE last_pct_at END,
+                     last_seen = MAX(last_seen, (SELECT last_seen FROM pool WHERE id = ?1))
+                  WHERE id = ?2",
+                params![from, into],
+            )
+            .map_err(sql)?;
+            for q in [
+                "DELETE FROM segment WHERE cycle_id IN (SELECT id FROM cycle WHERE pool_id = ?1)",
+                "DELETE FROM reset_event WHERE pool_id = ?1",
+                "DELETE FROM cycle WHERE pool_id = ?1",
+                "DELETE FROM overage_span WHERE overage_id = ?1",
+                "DELETE FROM overage_event WHERE overage_id = ?1",
+                "DELETE FROM pool_link WHERE overage_id = ?1 OR included_id = ?1",
+                "DELETE FROM sample WHERE pool_id = ?1",
+                "DELETE FROM pool WHERE id = ?1",
+            ] {
+                tx.execute(q, [from]).map_err(sql)?;
+            }
+            deleted.push(from);
+            refold.push((into, f64::NEG_INFINITY));
+        }
+        // A plan row is one vendor's tier, and the other vendor's can sit at
+        // the same instant under the shared key: both are kept, as when the
+        // two are read together. Only the same row met again is dropped.
+        let plans: Vec<(f64, String)> = {
+            let mut st = tx.prepare("SELECT at, plan FROM plan_sample WHERE account_id = ?1 ORDER BY at").map_err(sql)?;
+            let rows = st.query_map([src], |r| Ok((r.get(0)?, r.get(1)?))).map_err(sql)?;
+            rows.collect::<Result<_, _>>().map_err(sql)?
+        };
+        tx.execute("DELETE FROM plan_sample WHERE account_id = ?1", [src]).map_err(sql)?;
+        for (at, plan) in plans {
+            insert_plan(tx, dst, at, &plan)?;
+        }
+        for table in ["bank_sample", "watch_state"] {
+            let cols = match table {
+                "bank_sample" => "at, left, credits",
+                _ => "at, state, reason",
+            };
+            tx.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {table}(account_id, {cols}) SELECT ?2, {cols} FROM {table} WHERE account_id = ?1"
+                ),
+                params![src, dst],
+            )
+            .map_err(sql)?;
+            tx.execute(&format!("DELETE FROM {table} WHERE account_id = ?1"), [src])
+                .map_err(sql)?;
+        }
+        tx.execute("DELETE FROM bank_event WHERE account_id = ?1", [src]).map_err(sql)?;
+        tx.execute("DELETE FROM account WHERE id = ?1", [src]).map_err(sql)?;
+        banks_changed.push(dst);
+        // A plan row moved in changes what every pool of the plan is folded
+        // with, the ones that were Cursor's alone included.
+        for pool in pools_of(tx, dst)? {
+            refold.push((pool, f64::NEG_INFINITY));
+        }
+    }
+    meta_set(tx, &mk, shared)?;
+    Ok(deleted)
 }
 
 /// What the derived tables were folded with: the thresholds, as text.
@@ -1053,19 +1356,26 @@ fn upsert_account(tx: &Transaction, provider: &str, key: &str, heading: &str, no
 /// The pool row for `lane`, made or brought up to date. `last_seen` moves
 /// only on a live answer, and on every one, written or held back as
 /// unchanged: it is the liveness [`gone_at`] measures absence from, which
-/// the samples alone understate by up to the heartbeat.
+/// the samples alone understate by up to the heartbeat. `last_pct` moves
+/// with it, and `last_pct_at` records which `last_seen` it came with, so
+/// an older build moving `last_seen` alone is seen to have (schema v2).
+/// A pool made by a cached reading gets neither: that reading is no live
+/// answer, and stamped as one it outranked a live answer read before it.
 fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i64, String> {
     let (currency, exponent) = match &lane.unit {
         crate::shared::Unit::Money { currency, exponent } => (Some(currency.clone()), Some(*exponent)),
         _ => (None, None),
     };
     tx.query_row(
-        "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+        "INSERT INTO pool(account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen, last_pct,
+                          last_pct_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, CASE WHEN ?9 THEN ?10 END, CASE WHEN ?9 THEN ?8 END)
          ON CONFLICT(account_id, pool_key) DO UPDATE SET label = excluded.label, role = excluded.role,
              unit = excluded.unit, currency = excluded.currency, exponent = excluded.exponent,
              first_seen = MIN(first_seen, excluded.first_seen),
-             last_seen = CASE WHEN ?9 THEN MAX(last_seen, excluded.last_seen) ELSE last_seen END
+             last_seen = CASE WHEN ?9 THEN MAX(last_seen, excluded.last_seen) ELSE last_seen END,
+             last_pct = CASE WHEN ?9 AND excluded.last_seen >= last_seen THEN excluded.last_pct ELSE last_pct END,
+             last_pct_at = CASE WHEN ?9 AND excluded.last_seen >= last_seen THEN excluded.last_seen ELSE last_pct_at END
          RETURNING id",
         params![
             account,
@@ -1076,7 +1386,8 @@ fn upsert_pool(tx: &Transaction, account: i64, lane: &Lane, at: f64) -> Result<i
             currency,
             exponent,
             at,
-            !lane.stale
+            !lane.stale,
+            lane.pct.is_finite().then_some(lane.pct)
         ],
         |r| r.get(0),
     )
@@ -1099,7 +1410,7 @@ fn pools_of(tx: &Transaction, account: i64) -> Result<Vec<i64>, String> {
     rows.collect::<Result<_, _>>().map_err(sql)
 }
 
-const SAMPLE_COLS: &str = "at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi";
+const SAMPLE_COLS: &str = "at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi, grant_left, grant_total";
 
 fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
     Ok(Sample {
@@ -1111,6 +1422,8 @@ fn sample_row(r: &rusqlite::Row) -> rusqlite::Result<Sample> {
         reset_at: r.get(5)?,
         source: Source::from_name(&r.get::<_, String>(6)?),
         spacexsi: r.get(7)?,
+        grant_left: r.get(8)?,
+        grant_total: r.get(9)?,
     })
 }
 
@@ -1151,6 +1464,11 @@ fn write_lanes(
     watch_gap: f64,
     refold: &mut Vec<(i64, f64)>,
 ) -> Result<(), String> {
+    // Whose the pools are, by name: what a held reading is kept under
+    // beside the pool's id, which SQLite may give a pool made later.
+    let owner: String = tx
+        .query_row("SELECT provider || char(0) || account_key FROM account WHERE id = ?1", [account], |r| r.get(0))
+        .map_err(sql)?;
     for lane in lanes {
         // A projected window's figure belongs to a window that has closed
         // (§4); a lane with no fetch time or no key cannot be placed.
@@ -1158,6 +1476,7 @@ fn write_lanes(
             continue;
         }
         let pool = upsert_pool(tx, account, lane, lane.fetched_at)?;
+        let held = (pool, format!("{owner}\u{0}{}", lane.pool_key));
         let sample = Sample {
             at: lane.fetched_at,
             pct: lane.pct.is_finite().then_some(lane.pct),
@@ -1167,15 +1486,18 @@ fn write_lanes(
             reset_at: lane.reset,
             source: if lane.stale { Source::Cached } else { Source::Live },
             spacexsi: spacexsi.map(str::to_string),
+            grant_left: lane.grant_left.filter(|g| g.is_finite()),
+            grant_total: lane.grant_total.filter(|g| g.is_finite()),
         };
         let (before, after) = neighbours(tx, pool, sample.at)?;
         if super::should_write(before.as_ref(), after.as_ref(), &sample) {
-            if let Some(r) = bridge(seen.get(&pool), before.as_ref(), after.as_ref(), &sample, watch_gap) {
+            if let Some(r) = bridge(seen.get(&held), before.as_ref(), after.as_ref(), &sample, watch_gap) {
                 if insert_sample(tx, pool, &r)? {
                     refold.push((pool, r.at));
                 }
             }
-            seen.remove(&pool);
+            // Anything held under the id, this pool's or one it was before.
+            seen.retain(|(id, _), _| *id != pool);
             if insert_sample(tx, pool, &sample)? {
                 refold.push((pool, sample.at));
             }
@@ -1183,7 +1505,7 @@ fn write_lanes(
             // Held back as unchanged: remembered, in case the next change
             // needs it to show the pane was watching.
             if sample.source == Source::Live && sample.at > b.at && !super::changed(b, &sample) {
-                let kept = seen.entry(pool).or_default();
+                let kept = seen.entry(held).or_default();
                 kept.retain(|r| sample.at - r.at <= watch_gap);
                 if kept.len() >= SEEN_MOST {
                     kept.remove(0);
@@ -1196,8 +1518,11 @@ fn write_lanes(
 }
 
 /// Per pool, the live readings this pane held back as unchanged since the
-/// last one written, newest last.
-pub(super) type Seen = HashMap<i64, Vec<Sample>>;
+/// last one written, newest last. Keyed by the pool's id and by whose pool
+/// it is (provider, account key and pool key): a pool another pane deleted
+/// can have its id given to a pool of someone else's, and a reading held
+/// for the one must never be bridged into the other (review on OPS-309).
+pub(super) type Seen = HashMap<(i64, String), Vec<Sample>>;
 
 /// At most this many held-back readings are remembered per pool: enough
 /// for a watch gap's worth of polls, whatever the poll.
@@ -1263,7 +1588,7 @@ fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String
     let n = tx
         .execute(
             &format!(
-                "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                "INSERT OR IGNORE INTO sample(pool_id, {SAMPLE_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
             ),
             params![
                 pool,
@@ -1274,7 +1599,9 @@ fn insert_sample(tx: &Transaction, pool: i64, s: &Sample) -> Result<bool, String
                 s.window_secs,
                 s.reset_at,
                 s.source.name(),
-                s.spacexsi
+                s.spacexsi,
+                s.grant_left,
+                s.grant_total
             ],
         )
         .map_err(sql)?;
@@ -1370,21 +1697,38 @@ fn write_unified_plan(
     if last.as_ref().is_some_and(|(at, was)| *was == plan || p.at <= *at) {
         return Ok(None);
     }
-    // Both vendors can be read in the same instant, and the table holds one
-    // row per moment: the later of the two goes in the next representable
-    // instant, which orders it and moves nothing a reading can see.
-    let mut at = p.at;
+    insert_plan(tx, account, p.at, &plan)
+}
+
+/// Put one `vendor:plan` row under a unified account at `at`, or as near
+/// after it as the table allows. Both vendors can be read in the same
+/// instant, and the table holds one row per moment: the later of the two
+/// goes in the next representable instant, which orders it and moves
+/// nothing a reading can see. `None` when the same row is already there,
+/// or no instant near enough was free.
+fn insert_plan(tx: &Transaction, account: i64, at: f64, plan: &str) -> Result<Option<f64>, String> {
+    let mut at = at;
     for _ in 0..4 {
-        let wrote = tx
-            .execute(
-                "INSERT OR IGNORE INTO plan_sample(account_id, at, plan) VALUES (?1, ?2, ?3)",
-                params![account, at, plan],
+        let there: Option<String> = tx
+            .query_row(
+                "SELECT plan FROM plan_sample WHERE account_id = ?1 AND at = ?2",
+                params![account, at],
+                |r| r.get(0),
             )
+            .optional()
             .map_err(sql)?;
-        if wrote > 0 {
-            return Ok(Some(at));
+        match there {
+            Some(p) if p == plan => return Ok(None),
+            Some(_) => at = f64::from_bits(at.to_bits() + 1),
+            None => {
+                tx.execute(
+                    "INSERT INTO plan_sample(account_id, at, plan) VALUES (?1, ?2, ?3)",
+                    params![account, at, plan],
+                )
+                .map_err(sql)?;
+                return Ok(Some(at));
+            }
         }
-        at = f64::from_bits(at.to_bits() + 1);
     }
     Ok(None)
 }
@@ -1635,7 +1979,13 @@ fn gone_candidates(tx: &Transaction, account: i64, present: &[String]) -> Result
 /// pool's `last_seen`: an answer that changed nothing is held back from
 /// the samples until the hourly heartbeat, and measuring from the sample
 /// alone closed the cycle up to an hour early. `last_seen` is stored, not
-/// derived, so a full re-fold reads the same.
+/// derived, so a full re-fold reads the same. The idle check reads that
+/// same answer: `last_pct` where `last_seen` is the later, so a pool that
+/// fell to about zero inside the five-minute spacing, held back from the
+/// samples, is idle - not the earlier sample's figure (CodeRabbit on #681,
+/// OPS-309). A pool with no `last_pct` (not answered live since schema v2),
+/// or one set with an earlier `last_seen` than the stored one - an older
+/// build moved `last_seen` alone - reads the sample's, as before.
 fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, String> {
     // From the samples only, never from the cycles this fold is about to
     // replace: the pool's last live reading, its window and stated end.
@@ -1657,10 +2007,13 @@ fn gone_at(tx: &Transaction, pool: i64, t: &Thresholds) -> Result<Option<f64>, S
     let Some((sampled, pct, window, ends_at)) = last else {
         return Ok(None);
     };
-    let seen: f64 = tx
-        .query_row("SELECT last_seen FROM pool WHERE id = ?1", [pool], |r| r.get(0))
+    let (seen, seen_pct, pct_at): (f64, Option<f64>, Option<f64>) = tx
+        .query_row("SELECT last_seen, last_pct, last_pct_at FROM pool WHERE id = ?1", [pool], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .map_err(sql)?;
     let last = sampled.max(seen);
+    let pct = if seen > sampled && pct_at == Some(seen) { seen_pct.or(pct) } else { pct };
     let Some(window) = window.filter(|w| *w > 0.0) else {
         return Ok(None);
     };
@@ -2328,6 +2681,103 @@ mod tests {
         );
     }
 
+    /// Every row of `table`, as text, in a fixed order.
+    fn rows_of(c: &Connection, table: &str, cols: &str) -> Vec<String> {
+        let mut st = c.prepare(&format!("SELECT {cols} FROM {table} ORDER BY 1, 2")).unwrap();
+        let n = st.column_count();
+        st.query_map([], |r| {
+            Ok((0..n)
+                .map(|i| format!("{:?}", r.get_ref(i).unwrap()))
+                .collect::<Vec<_>>()
+                .join("|"))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+    }
+
+    fn columns_of(c: &Connection, table: &str) -> Vec<String> {
+        let mut st = c.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        st.query_map([], |r| r.get::<_, String>(1)).unwrap().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn a_v1_file_migrates_to_v2_with_its_data_intact_and_racing_panes_migrate_once() {
+        // A v1 file with history in it: written by this build, then taken
+        // back to exactly the v1 shape (the v2 columns dropped).
+        let p = temp("v1-to-v2");
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        {
+            let mut h = History::open(&p).unwrap();
+            let mut at = a;
+            for pct in [10.0, 25.0, 40.0, 3.0, 9.0] {
+                h.record(&[two_pools(at, Some((pct, a + 4.0 * H)), pct / 2.0, false)], &t, at).unwrap();
+                at += 2.0 * H;
+            }
+        }
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute_batch(
+                "ALTER TABLE sample DROP COLUMN grant_left; ALTER TABLE sample DROP COLUMN grant_total;
+                 ALTER TABLE pool DROP COLUMN last_pct;
+                 ALTER TABLE pool DROP COLUMN last_pct_at; PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let sample_cols = "pool_id, at, pct, used_amount, limit_amount, window_secs, reset_at, source, spacexsi";
+        let pool_cols = "id, account_id, pool_key, label, role, unit, currency, exponent, first_seen, last_seen";
+        let before = {
+            let c = Connection::open(&p).unwrap();
+            assert_eq!(c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+            (
+                rows_of(&c, "sample", sample_cols),
+                rows_of(&c, "pool", pool_cols),
+                rows_of(&c, "cycle", "*"),
+                rows_of(&c, "reset_event", "*"),
+            )
+        };
+        assert!(!before.0.is_empty() && !before.2.is_empty());
+        // Two panes open it at once: one migrates, the other finds it done.
+        let opened: Vec<_> = (0..2)
+            .map(|_| {
+                let p = p.clone();
+                std::thread::spawn(move || History::open(&p).map(|_| ()))
+            })
+            .collect();
+        for o in opened {
+            o.join().unwrap().unwrap();
+        }
+        let h = History::open(&p).unwrap();
+        let v: i64 = h.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, 2);
+        let after = (
+            rows_of(&h.conn, "sample", sample_cols),
+            rows_of(&h.conn, "pool", pool_cols),
+            rows_of(&h.conn, "cycle", "*"),
+            rows_of(&h.conn, "reset_event", "*"),
+        );
+        assert_eq!(after, before, "every raw and derived row as it was");
+        // The new columns are there, unstated on the old rows.
+        let unstated: i64 = h
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM sample WHERE grant_left IS NOT NULL)
+                      + (SELECT COUNT(*) FROM sample WHERE grant_total IS NOT NULL)
+                      + (SELECT COUNT(*) FROM pool WHERE last_pct IS NOT NULL)
+                      + (SELECT COUNT(*) FROM pool WHERE last_pct_at IS NOT NULL)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(unstated, 0);
+        // And the migrated file has the shape of a new one.
+        let fresh = History::open(&temp("v2-fresh")).unwrap();
+        for table in ["sample", "pool"] {
+            assert_eq!(columns_of(&h.conn, table), columns_of(&fresh.conn, table), "{table}");
+        }
+    }
+
     #[test]
     fn a_damaged_file_is_renamed_not_deleted_and_said_once() {
         let p = temp("damaged");
@@ -2687,6 +3137,107 @@ mod tests {
     }
 
     #[test]
+    fn a_pool_that_falls_to_about_zero_just_before_it_vanishes_is_idle_not_gone() {
+        // CodeRabbit 4724191237 on #681 (OPS-309 item 8): the five-hour pool
+        // reads 40%, then 0% a minute later - inside the five-minute spacing,
+        // so the 0% is not written, though it is a live answer and moves
+        // `last_seen`. Then it is missing for a whole window while the weekly
+        // pool answers. The absence is timed from the 0% answer, so the idle
+        // check reads that answer too: a limit last read at about zero is
+        // idle, and its absence is no sign it is gone.
+        let p = temp("pool-gone-fell-to-zero");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        h.record(&[two_pools(a + 60.0, Some((0.0, end)), 10.0, false)], &t, a + 60.0).unwrap();
+        let key = obs(vec![]).account_key();
+        assert_eq!(h.samples("codex", &key, "primary_window").unwrap().len(), 1, "the 0% is held back");
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert!(c.iter().all(|c| c.end_reason != Some(EndReason::PoolGone)), "{c:#?}");
+        let (stored, full) = stored_then_full(&mut h, "primary_window");
+        assert_eq!(stored, full);
+        // The other way round - 0% stored, 40% held back - the last live
+        // answer is not idle, and the pool is gone a window after it.
+        let mut g = History::open(&temp("pool-gone-rose-from-zero")).unwrap();
+        g.record(&[two_pools(a, Some((0.0, end)), 10.0, false)], &t, a).unwrap();
+        g.record(&[two_pools(a + 60.0, Some((40.0, end)), 10.0, false)], &t, a + 60.0).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            g.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let c = g.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c.last().unwrap().end_reason, Some(EndReason::PoolGone), "{c:#?}");
+    }
+
+    #[test]
+    fn a_cached_reading_that_makes_a_pool_is_not_its_last_live_percentage() {
+        // Review on OPS-309: a pool first written from a cached reading
+        // took that reading's percentage as the last live answer's. A live
+        // answer read earlier, written after, could not move it, so a pool
+        // last read live at 0% was judged on the cached 40% and closed as
+        // gone instead of idle.
+        let mut h = History::open(&temp("pool-gone-cached-first")).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        let mut cached = two_pools(a + 600.0, Some((40.0, end)), 10.0, false);
+        cached.lanes[0].stale = true;
+        h.record(&[cached], &t, a + 600.0).unwrap();
+        let (pct, pct_at): (Option<f64>, Option<f64>) = h
+            .conn
+            .query_row("SELECT last_pct, last_pct_at FROM pool WHERE pool_key = 'primary_window'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!((pct, pct_at), (None, None), "a cached reading stamped as live");
+        h.record(&[two_pools(a, Some((0.0, end)), 10.0, false)], &t, a + 700.0).unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let key = obs(vec![]).account_key();
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert!(c.iter().all(|c| c.end_reason != Some(EndReason::PoolGone)), "{c:#?}");
+    }
+
+    #[test]
+    fn a_last_pct_from_an_earlier_answer_than_last_seen_is_not_trusted() {
+        // Review on OPS-309: a pane on an older build, opened before the
+        // migration, goes on moving `last_seen` and knows nothing of
+        // `last_pct`. The 0% this build stored is then the figure of an
+        // earlier answer than the one the absence is timed from, and must
+        // not make the pool idle: the v1 rule, the last sample's figure,
+        // decides instead.
+        let mut h = History::open(&temp("pool-gone-old-pane")).unwrap();
+        let t = Thresholds::default();
+        let a = 2_000_000.0;
+        let end = a + 4.0 * H;
+        h.record(&[two_pools(a, Some((40.0, end)), 10.0, false)], &t, a).unwrap();
+        h.record(&[two_pools(a + 60.0, Some((0.0, end)), 10.0, false)], &t, a + 60.0).unwrap();
+        // The old pane's live answer, two minutes on: `last_seen` only.
+        h.conn
+            .execute("UPDATE pool SET last_seen = ?1 WHERE pool_key = 'primary_window'", [a + 120.0])
+            .unwrap();
+        let mut at = a + 0.5 * H;
+        while at <= a + 6.0 * H {
+            h.record(&[two_pools(at, None, 10.0 + (at - a) / H, false)], &t, at).unwrap();
+            at += 0.5 * H;
+        }
+        let key = obs(vec![]).account_key();
+        let c = h.cycles("codex", &key, "primary_window").unwrap();
+        assert_eq!(c.last().unwrap().end_reason, Some(EndReason::PoolGone), "{c:#?}");
+    }
+
+    #[test]
     fn a_pool_whose_only_cycle_is_open_reads_only_its_new_samples_on_a_write() {
         // The known gap: an undated pool that never falls back to zero -
         // Claude's extra usage on a cap nobody reaches - has one open cycle
@@ -2886,11 +3437,98 @@ mod tests {
         h.record(&[down.clone()], &t, a + H).unwrap();
         assert_eq!(h.count("account"), 1, "an outage made an account of its own");
         assert_eq!(h.count("watch_state"), 1);
-        assert_eq!(h.account_key_of(&down), o.account_key());
+        assert_eq!(h.account_key_of(&down), Some(o.account_key()));
         // A provider never seen with an id keeps its profile key.
         let mut never = down.clone();
         never.provider = "notion".into();
-        assert_eq!(h.account_key_of(&never), "profile:default");
+        assert_eq!(h.account_key_of(&never).as_deref(), Some("profile:default"));
+    }
+
+    /// Copilot as the signer tests read it: a login the live body names, and
+    /// the token entry's `host:login` from the config.
+    fn signed(login: &str, lanes: Vec<Lane>) -> Observation {
+        let mut o = obs(lanes);
+        o.provider = "copilot".into();
+        o.account_id = login.into();
+        o.signer = format!("github.com:{login}");
+        o
+    }
+
+    fn outage(o: &Observation, signer: &str, at: f64) -> Observation {
+        let mut down = o.clone();
+        down.account_id.clear();
+        down.signer = signer.into();
+        down.lanes = vec![lane("primary_window", 30.0, at, at + WEEK, WEEK)];
+        down.watch = Some(super::super::WatchReading {
+            at,
+            state: "network".into(),
+            reason: "timed out".into(),
+        });
+        down
+    }
+
+    #[test]
+    fn an_outage_after_a_token_refresh_keeps_the_account() {
+        let p = temp("signer-refresh");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let o = signed("alice", vec![lane("primary_window", 10.0, a, a + WEEK, WEEK)]);
+        h.record(&[o.clone()], &t, a).unwrap();
+        // The token was refreshed, the entry still names the same sign-in.
+        let down = outage(&o, "github.com:alice", a + H);
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.count("account"), 1);
+        assert_eq!(h.account_key_of(&down), Some(o.account_key()));
+        assert_eq!(h.samples("copilot", &o.account_key(), "primary_window").unwrap().len(), 2);
+        assert_eq!(h.count("watch_state"), 1);
+    }
+
+    #[test]
+    fn an_outage_after_a_sign_in_as_someone_else_files_nothing() {
+        let p = temp("signer-switch");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let o = signed("alice", vec![lane("primary_window", 10.0, a, a + WEEK, WEEK)]);
+        h.record(&[o.clone()], &t, a).unwrap();
+        // Signed in as bob, and the call that would name him failed.
+        let down = outage(&o, "github.com:bob", a + H);
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.account_key_of(&down), None, "bob's pass was filed under some account");
+        assert_eq!(h.count("account"), 1);
+        assert_eq!(h.count("sample"), 1, "bob's reading went into alice's history");
+        assert_eq!(h.count("watch_state"), 0);
+        // Once bob's id arrives his history starts under his own key, and
+        // alice's last-seen pairing moves with it.
+        let bob = signed("bob", vec![lane("primary_window", 31.0, a + 2.0 * H, a + WEEK, WEEK)]);
+        h.record(&[bob.clone()], &t, a + 2.0 * H).unwrap();
+        assert_eq!(h.count("account"), 2);
+        let later = outage(&bob, "github.com:bob", a + 3.0 * H);
+        assert_eq!(h.account_key_of(&later), Some(bob.account_key()));
+    }
+
+    #[test]
+    fn a_provider_whose_credential_names_nobody_keeps_the_last_account_seen() {
+        // Claude: both tokens rotate on refresh, so there is no signer, and
+        // an outage is filed under the account last seen, as before.
+        let p = temp("signer-none");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let mut o = obs(vec![lane("five_hour", 10.0, a, a + 5.0 * H, 5.0 * H)]);
+        o.provider = "claude".into();
+        h.record(&[o.clone()], &t, a).unwrap();
+        let down = outage(&o, "", a + H);
+        h.record(&[down.clone()], &t, a + H).unwrap();
+        assert_eq!(h.account_key_of(&down), Some(o.account_key()));
+        assert_eq!(h.count("account"), 1);
+        assert_eq!(h.count("watch_state"), 1);
+        // A signer where the last stable pass had none cannot be compared
+        // either, so it is not read as a switch.
+        let mut odd = down.clone();
+        odd.signer = "something".into();
+        assert_eq!(h.account_key_of(&odd), Some(o.account_key()));
     }
 
     #[test]
@@ -3637,6 +4275,322 @@ mod tests {
         assert_eq!(h.spacexsi_key_of(&grok), Some(plan));
     }
 
+    /// Grok on the unified plan by itself, as `vendors::observations` keys
+    /// it: SpaceXSI's copy under Grok's own key.
+    fn grok_alone(pct: f64, at: f64) -> Observation {
+        let mut g = obs(vec![lane("credits", pct, at, 600000.0, WEEK)]);
+        g.provider = "grok".into();
+        g.account_id = "grok-acct".into();
+        g.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        g.spacexsi_account = Some(g.account_key());
+        g.plan = Some(super::super::PlanReading { at, plan: "supergrok".into() });
+        g
+    }
+
+    /// Cursor and Grok on one shared account: both write under Cursor's key.
+    fn shared_pair(pct: f64, at: f64) -> (Observation, Observation) {
+        let mut c = obs(vec![lane("weekly_pool", pct, at, 600000.0, WEEK)]);
+        c.provider = "cursor".into();
+        c.account_id = "cursor-acct".into();
+        c.spacexsi = Some(crate::shared::Spacexsi::Shared);
+        c.spacexsi_account = Some(c.account_key());
+        let mut g = grok_alone(pct, at);
+        g.spacexsi = Some(crate::shared::Spacexsi::Shared);
+        g.spacexsi_account = c.spacexsi_account.clone();
+        (c, g)
+    }
+
+    fn spacexsi_pcts(h: &History, key: &str) -> Vec<(f64, f64)> {
+        h.samples("spacexsi", key, "weekly_pool")
+            .unwrap()
+            .iter()
+            .map(|s| (s.at, s.pct.unwrap_or(f64::NAN)))
+            .collect()
+    }
+
+    fn spacexsi_accounts(h: &History) -> i64 {
+        h.conn
+            .query_row("SELECT COUNT(*) FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn grok_s_alone_history_moves_into_the_shared_plan_whole_and_folded() {
+        let p = temp("merge-alone");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        for (i, pct) in [10.0, 20.0, 30.0].into_iter().enumerate() {
+            let at = 5000.0 + i as f64 * 1000.0;
+            h.record(&[grok_alone(pct, at)], &t, at).unwrap();
+        }
+        let alone = grok_alone(0.0, 0.0).account_key();
+        assert_eq!(spacexsi_pcts(&h, &alone).len(), 3);
+        // Cursor signs in to the same account: the plan is shared.
+        let (c, g) = shared_pair(40.0, 9000.0);
+        h.record(&[c.clone(), g.clone()], &t, 9000.0).unwrap();
+        let shared = c.account_key();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (7000.0, 30.0), (9000.0, 40.0)],
+            "a sample was lost or altered in the merge"
+        );
+        assert_eq!(spacexsi_accounts(&h), 1, "the alone key's account was left behind");
+        assert_eq!(h.since("spacexsi", &shared), Some(5000.0));
+        assert_eq!(h.spacexsi_key_of(&g), Some(shared.clone()));
+        // Folded again over the whole merged history: one cycle from the
+        // first alone sample on.
+        let cycles = h.cycles("spacexsi", &shared, "weekly_pool").unwrap();
+        assert_eq!(cycles.len(), 1);
+        assert_eq!(cycles[0].first_obs_at, Some(5000.0));
+        // The plan samples came too, and Grok's own vendor history is as it was.
+        let unified: i64 = h
+            .conn
+            .query_row("SELECT id FROM account WHERE provider = 'spacexsi'", [], |r| r.get(0))
+            .unwrap();
+        assert!(load_plans(&h.conn, unified).unwrap().iter().any(|p| p.at == 5000.0));
+        assert_eq!(h.samples("grok", &alone, "credits").unwrap().len(), 4);
+        assert_eq!(h.meta(&merged_key("grok", &alone)).unwrap(), Some(shared));
+    }
+
+    #[test]
+    fn a_merge_keeps_one_of_two_samples_at_one_instant_and_only_moves_once() {
+        let p = temp("merge-dedup");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        h.record(&[grok_alone(20.0, 6000.0)], &t, 6000.0).unwrap();
+        // Cursor, alone on the same plan beforehand, read it at 6000 too:
+        // the same instant under the key the merge moves into.
+        let (mut c, _) = shared_pair(20.0, 6000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        h.record(&[c.clone()], &t, 6000.0).unwrap();
+        let shared = c.account_key();
+        assert_eq!(spacexsi_pcts(&h, &shared), vec![(6000.0, 20.0)]);
+        let (c, g) = shared_pair(30.0, 9000.0);
+        h.record(&[c.clone(), g.clone()], &t, 9000.0).unwrap();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (9000.0, 30.0)],
+            "the instant both held was kept twice or the merge lost one"
+        );
+        // Once: a later pass does not merge again. A row put under the old
+        // key by hand stays where it is.
+        let alone = grok_alone(0.0, 0.0).account_key();
+        h.conn
+            .execute(
+                "INSERT INTO account(provider, account_key, heading, first_seen, last_seen)
+                 VALUES ('spacexsi', ?1, 'x', 1, 1)",
+                [&alone],
+            )
+            .unwrap();
+        let (c, g) = shared_pair(35.0, 9500.0);
+        h.record(&[c, g], &t, 9500.0).unwrap();
+        assert_eq!(spacexsi_accounts(&h), 2, "the merge ran a second time");
+        assert_eq!(spacexsi_pcts(&h, &shared).len(), 4);
+    }
+
+    #[test]
+    fn a_merge_forgets_the_readings_held_back_under_the_pools_it_deleted() {
+        // Review on OPS-309: `seen` is keyed by pool id, and the merge
+        // deletes the alone pool it moves into the shared one. A held-back
+        // reading kept under that id could be bridged into whichever pool
+        // SQLite gives the id to next.
+        let mut h = History::open(&temp("merge-seen")).unwrap();
+        let t = Thresholds::default();
+        let (mut c, _) = shared_pair(20.0, 5000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        h.record(&[c], &t, 5000.0).unwrap();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        // Unchanged a few minutes on: held back, remembered under its pool.
+        h.record(&[grok_alone(10.0, 5400.0)], &t, 5400.0).unwrap();
+        let alone_pool: i64 = h
+            .conn
+            .query_row(
+                "SELECT p.id FROM pool p JOIN account a ON a.id = p.account_id
+                  WHERE a.provider = 'spacexsi' AND a.account_key = ?1 AND p.pool_key = 'weekly_pool'",
+                [grok_alone(0.0, 0.0).account_key()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(h.seen.keys().any(|(id, _)| *id == alone_pool), "the test needs a held-back reading");
+        let (c, g) = shared_pair(30.0, 9000.0);
+        h.record(&[c, g], &t, 9000.0).unwrap();
+        let gone: bool = h
+            .conn
+            .query_row("SELECT NOT EXISTS (SELECT 1 FROM pool WHERE id = ?1)", [alone_pool], |r| r.get(0))
+            .unwrap();
+        assert!(gone, "the merge deletes the alone pool");
+        assert!(!h.seen.keys().any(|(id, _)| *id == alone_pool), "a deleted pool's held-back readings were kept");
+    }
+
+    #[test]
+    fn a_merge_keeps_both_vendors_plan_changes_at_one_instant() {
+        // Review on OPS-309: the merge moved plan rows with INSERT OR
+        // IGNORE, so Grok's tier read at the instant Cursor's was already
+        // stored under the shared key was dropped, and the plan was folded
+        // without it.
+        let mut h = History::open(&temp("merge-plans")).unwrap();
+        let t = Thresholds::default();
+        let (mut c, _) = shared_pair(20.0, 5000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        c.plan = Some(super::super::PlanReading { at: 5000.0, plan: "pro".into() });
+        h.record(&[c.clone()], &t, 5000.0).unwrap();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        let (mut c, g) = shared_pair(30.0, 9000.0);
+        c.plan = Some(super::super::PlanReading { at: 5000.0, plan: "pro".into() });
+        h.record(&[c.clone(), g], &t, 9000.0).unwrap();
+        let plans = |h: &History| -> Vec<(f64, String)> {
+            let mut st = h
+                .conn
+                .prepare(
+                    "SELECT p.at, p.plan FROM plan_sample p JOIN account a ON a.id = p.account_id
+                      WHERE a.provider = 'spacexsi' AND a.account_key = ?1 ORDER BY p.at",
+                )
+                .unwrap();
+            st.query_map([c.account_key()], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+        };
+        let next = f64::from_bits(5000f64.to_bits() + 1);
+        assert_eq!(
+            plans(&h),
+            vec![(5000.0, "cursor:pro".to_string()), (next, "grok:supergrok".to_string())],
+            "Grok's tier read at 5000 was lost, or dated by a later pass"
+        );
+        // The same reading met twice is one row, not two.
+        let tx = h.conn.unchecked_transaction().unwrap();
+        let dst: i64 = tx
+            .query_row("SELECT id FROM account WHERE provider = 'spacexsi' AND account_key = ?1", [c.account_key()], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(insert_plan(&tx, dst, 5000.0, "grok:supergrok").unwrap(), None);
+        assert_eq!(insert_plan(&tx, dst, 1.0, "grok:x").unwrap(), Some(1.0));
+        assert_eq!(insert_plan(&tx, dst, 1.0, "cursor:y").unwrap(), Some(f64::from_bits(1f64.to_bits() + 1)));
+    }
+
+    #[test]
+    fn a_reading_held_in_one_pane_is_never_bridged_into_a_pool_another_pane_made_under_its_id() {
+        // Review on OPS-309: the merge forgets the held readings of the
+        // pane that ran it, and no other's. A pane holding a Grok reading
+        // under the deleted pool's id bridged it into the pool SQLite gave
+        // that id to next.
+        let p = temp("merge-seen-panes");
+        let mut a = History::open(&p).unwrap();
+        let mut b = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        let (mut c, _) = shared_pair(20.0, 5000.0);
+        c.spacexsi = Some(crate::shared::Spacexsi::Alone);
+        a.record(&[c], &t, 5000.0).unwrap();
+        b.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        b.record(&[grok_alone(10.0, 6000.0)], &t, 6000.0).unwrap();
+        let alone_pool: i64 = b
+            .conn
+            .query_row(
+                "SELECT p.id FROM pool p JOIN account a ON a.id = p.account_id
+                  WHERE a.provider = 'spacexsi' AND a.account_key = ?1 AND p.pool_key = 'weekly_pool'",
+                [grok_alone(0.0, 0.0).account_key()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(b.seen.keys().any(|(id, _)| *id == alone_pool), "the test needs a held-back reading");
+        let (c, g) = shared_pair(30.0, 6100.0);
+        a.record(&[c, g], &t, 6100.0).unwrap();
+        // Pane A makes a pool of another account, which takes the id, and
+        // pane B writes its next reading.
+        let other = |pct: f64, at: f64| {
+            let mut o = obs(vec![lane("weekly", pct, at, 600000.0, WEEK)]);
+            o.provider = "claude".into();
+            o.account_id = "someone".into();
+            o
+        };
+        a.record(&[other(50.0, 5400.0)], &t, 6200.0).unwrap();
+        let reused: i64 = b
+            .conn
+            .query_row("SELECT p.id FROM pool p JOIN account a ON a.id = p.account_id WHERE a.provider = 'claude'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(reused, alone_pool, "the test needs the id given again");
+        b.record(&[other(60.0, 6500.0)], &t, 6500.0).unwrap();
+        let at: Vec<f64> = b.samples("claude", &other(0.0, 0.0).account_key(), "weekly").unwrap().iter().map(|s| s.at).collect();
+        assert_eq!(at, vec![5400.0, 6500.0], "another pool's held reading was bridged in");
+    }
+
+    #[test]
+    fn two_panes_racing_the_merge_move_it_once_and_lose_nothing() {
+        let p = temp("merge-race");
+        {
+            let mut h = History::open(&p).unwrap();
+            for (i, pct) in [10.0, 20.0, 30.0].into_iter().enumerate() {
+                let at = 5000.0 + i as f64 * 1000.0;
+                h.record(&[grok_alone(pct, at)], &Thresholds::default(), at).unwrap();
+            }
+        }
+        let panes: Vec<_> = (0..2)
+            .map(|_| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    let mut h = History::open(&p).unwrap();
+                    let (c, g) = shared_pair(40.0, 9000.0);
+                    loop {
+                        match h.record(&[c.clone(), g.clone()], &Thresholds::default(), 9000.0) {
+                            Ok(()) => break,
+                            Err(why) if busy(&why) => std::thread::yield_now(),
+                            Err(why) => panic!("{why}"),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for pane in panes {
+            pane.join().unwrap();
+        }
+        let h = History::open(&p).unwrap();
+        let shared = shared_pair(0.0, 0.0).0.account_key();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (7000.0, 30.0), (9000.0, 40.0)]
+        );
+        assert_eq!(spacexsi_accounts(&h), 1);
+        let open: i64 = h
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM cycle c JOIN pool p ON p.id = c.pool_id JOIN account a ON a.id = p.account_id
+                  WHERE a.provider = 'spacexsi' AND c.closed_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 1, "one open cycle on the merged pool");
+    }
+
+    #[test]
+    fn going_back_to_alone_keeps_the_merged_history_where_it_went() {
+        let p = temp("merge-back");
+        let mut h = History::open(&p).unwrap();
+        let t = Thresholds::default();
+        h.record(&[grok_alone(10.0, 5000.0)], &t, 5000.0).unwrap();
+        let (c, g) = shared_pair(20.0, 6000.0);
+        h.record(&[c.clone(), g], &t, 6000.0).unwrap();
+        let shared = c.account_key();
+        // Cursor signs out: Grok is alone on the plan again. Nothing is
+        // moved back - which samples were read alone is not something a
+        // shared pool can tell - and Grok's tab starts a history of its own
+        // from here, as it did the first time.
+        h.record(&[grok_alone(30.0, 7000.0)], &t, 7000.0).unwrap();
+        let alone = grok_alone(0.0, 0.0).account_key();
+        assert_eq!(spacexsi_pcts(&h, &shared), vec![(5000.0, 10.0), (6000.0, 20.0)]);
+        assert_eq!(spacexsi_pcts(&h, &alone), vec![(7000.0, 30.0)]);
+        assert_eq!(h.meta(&merged_key("grok", &alone)).unwrap(), None);
+        // Shared again: that stretch moves over as the first one did.
+        let (c, g) = shared_pair(40.0, 9000.0);
+        h.record(&[c, g], &t, 9000.0).unwrap();
+        assert_eq!(
+            spacexsi_pcts(&h, &shared),
+            vec![(5000.0, 10.0), (6000.0, 20.0), (7000.0, 30.0), (9000.0, 40.0)]
+        );
+        assert_eq!(spacexsi_accounts(&h), 1);
+    }
+
     #[test]
     fn a_money_pool_keeps_its_unit_and_amounts() {
         let p = temp("money");
@@ -3729,6 +4683,8 @@ mod tests {
                 reset_at: Some(reset),
                 source: Source::Backfill,
                 spacexsi: None,
+                grant_left: None,
+                grant_total: None,
             },
         }
     }
@@ -3835,6 +4791,37 @@ mod tests {
         let alone: Vec<f64> = g.samples("codex", &key, "secondary_window").unwrap().iter().map(|x| x.at).collect();
         let model: Vec<f64> = backfill::thin(rows).iter().map(|r| r.sample.at).collect();
         assert_eq!(alone, model);
+    }
+
+    #[test]
+    fn a_replayed_reading_moves_last_seen_with_its_own_percentage_never_zero() {
+        // Review on OPS-309: a replayed row's lane was built from
+        // `Lane::default()`, so it moved `last_seen` with a `last_pct` of
+        // 0 nobody measured, and `gone_at` judged the pool idle on it.
+        let mut h = History::open(&temp("replay-last-pct")).unwrap();
+        let t = Thresholds::default();
+        let a = 1_000_000.0;
+        let key = obs(vec![]).account_key();
+        let rows = vec![replayed(a, 40.0, a + WEEK), replayed(a + 60.0, 40.0, a + WEEK)];
+        h.replay("codex", &key, "CODEX", &rows, &t, a + 100.0).unwrap();
+        assert_eq!(h.samples("codex", &key, "secondary_window").unwrap().len(), 1);
+        let (seen, pct): (f64, Option<f64>) = h
+            .conn
+            .query_row("SELECT last_seen, last_pct FROM pool WHERE pool_key = 'secondary_window'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        // The held-back row is a real reading at its own time.
+        assert_eq!((seen, pct), (a + 60.0, Some(40.0)));
+        // A row with no percentage states none.
+        let mut bare = replayed(a + 200.0, 0.0, a + WEEK);
+        bare.sample.pct = None;
+        h.replay("codex", &key, "CODEX", &[bare], &t, a + 300.0).unwrap();
+        let pct: Option<f64> = h
+            .conn
+            .query_row("SELECT last_pct FROM pool WHERE pool_key = 'secondary_window'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pct, None);
     }
 
     #[test]

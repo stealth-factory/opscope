@@ -126,6 +126,13 @@ pub struct Sample {
     pub source: Source,
     /// `no` / `alone` / `shared` / `separate` on Cursor and Grok, else `None`.
     pub spacexsi: Option<String>,
+    /// On a balance: what the grant expiring at `reset_at` still held, where
+    /// the provider says ([`crate::shared::Lane::grant_left`]). `None` is
+    /// unstated. Schema v2.
+    pub grant_left: Option<f64>,
+    /// What that grant was granted ([`crate::shared::Lane::grant_total`]).
+    /// `None` is unstated. Schema v2.
+    pub grant_total: Option<f64>,
 }
 
 /// An account's plan, from the time it was first seen (`plan_sample`).
@@ -1238,6 +1245,8 @@ mod tests {
             reset_at: reset,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
+            grant_total: None,
         }
     }
 

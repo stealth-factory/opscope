@@ -44,6 +44,7 @@ pub mod draw;
 // The fold's types carry what phase 2 (resets) and phase 3 (charts) read.
 #[allow(dead_code)]
 pub mod fold;
+pub mod local;
 pub mod overage;
 pub mod resets;
 // Read helpers (`cycles`, `samples`) are phase 3's, for the charts.
@@ -167,6 +168,14 @@ pub struct Observation {
     /// What keys the account when there is no stable id: the configured
     /// profile's label, or empty for the default.
     pub profile: String,
+    /// Whose the credential on disk is, as far as the credential itself
+    /// says, in a form that survives a token refresh and changes on a
+    /// sign-in as someone else - Copilot's `host:login` token entry. Empty
+    /// where the credential says nothing of the kind (Claude's tokens both
+    /// rotate on refresh). Compared only with itself: the store keeps the
+    /// one seen beside the last stable id, and an id-less pass whose signer
+    /// differs is filed under no account (OPS-309).
+    pub signer: String,
     /// The `[+]` heading, display only.
     pub heading: String,
     /// The tab this observation is drawn on, so the tab can find its line.
@@ -184,6 +193,10 @@ pub struct Observation {
     /// Per-request charges the provider published with this pass's
     /// readings (Cursor's usage events, §6.3), for `overage_event`.
     pub charges: Vec<overage::Charge>,
+    /// This machine's agent logs for the account (§6.3, source 3): the
+    /// Claude config dir's `projects`, Codex's rollout roots. Empty for a
+    /// provider with no local agent.
+    pub local_logs: Vec<String>,
 }
 
 impl Observation {
@@ -262,6 +275,11 @@ pub fn changed(a: &Sample, b: &Sample) -> bool {
         || opt_differs(a.limit, b.limit, 1e-9)
         || opt_differs(a.window_secs, b.window_secs, 1.0)
         || opt_differs(a.reset_at, b.reset_at, fold::tolerance(b.window_secs.or(a.window_secs)))
+        // What a lapsing grant still held, and was granted, is the evidence
+        // that tells its expiry from spend: a reading that brings it without
+        // moving the totals is written, not held until the heartbeat.
+        || opt_differs(a.grant_left, b.grant_left, 1e-9)
+        || opt_differs(a.grant_total, b.grant_total, 1e-9)
 }
 
 /// Whether `new` is written, given the stored samples either side of it
@@ -322,6 +340,9 @@ pub struct Recorder {
     failed: Option<String>,
     /// The one-off Codex backfill, read on a thread of its own (§8).
     backfill: backfill::Runner,
+    /// The local agent turns inside long spend brackets, read on a thread
+    /// of their own (§6.3, source 3).
+    local: local::Reader,
     /// Why the history stopped: a panic inside a pass. Kept and said.
     stopped: Option<String>,
     /// Makes the next pass panic, for the test that it is caught.
@@ -343,6 +364,7 @@ impl Recorder {
             note: None,
             failed: None,
             backfill: backfill::Runner::new(roots),
+            local: local::Reader::default(),
             stopped: None,
             #[cfg(test)]
             panic_next: false,
@@ -423,7 +445,10 @@ impl Recorder {
                 status.notes.insert(tab, words);
             }
             match chart::gather(h, obs, t) {
-                Ok(charts) => status.charts = charts,
+                Ok(mut charts) => {
+                    self.local.tick(h, &mut charts, obs, now);
+                    status.charts = charts;
+                }
                 Err(why) if store::busy(&why) => {}
                 Err(why) => self.failed = Some(format!("history not read: {why}")),
             }
@@ -431,7 +456,7 @@ impl Recorder {
                 // A unified account's tab draws the plan's own history.
                 let at = match h.spacexsi_key_of(o) {
                     Some(key) => h.since("spacexsi", &key),
-                    None => h.since(&o.provider, &h.account_key_of(o)),
+                    None => h.account_key_of(o).and_then(|k| h.since(&o.provider, &k)),
                 };
                 if let Some(at) = at {
                     let e = status.since.entry(o.tab.clone()).or_insert(at);
@@ -458,6 +483,8 @@ mod tests {
             reset_at: reset,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
+            grant_total: None,
         }
     }
 
@@ -480,6 +507,18 @@ mod tests {
         assert!(!should_write(Some(&p), None, &s(1400.0, 10.0, Some(20030.0))));
         // One that moved by more than the tolerance is.
         assert!(should_write(Some(&p), None, &s(1400.0, 10.0, Some(20400.0))));
+    }
+
+    #[test]
+    fn a_reading_that_only_brings_grant_evidence_is_a_change() {
+        // CodeRabbit on #690: the totals unchanged, a reading that newly
+        // states what the lapsing grant holds was held until the heartbeat,
+        // and the lapse in between was read as spend.
+        let p = s(1000.0, 10.0, Some(20000.0));
+        let with = |left: Option<f64>, total: Option<f64>| Sample { grant_left: left, grant_total: total, ..s(1400.0, 10.0, Some(20000.0)) };
+        assert!(should_write(Some(&p), None, &with(Some(20.0), None)));
+        assert!(should_write(Some(&p), None, &with(None, Some(100.0))));
+        assert!(!should_write(Some(&p), None, &with(None, None)), "and nothing new is still no change");
     }
 
     #[test]

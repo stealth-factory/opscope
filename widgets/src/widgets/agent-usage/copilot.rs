@@ -77,6 +77,9 @@ pub struct Data {
     live_kept: Option<Kept>,
     /// When `live` was fetched: a kept reading's own time.
     fetched_at: f64,
+    /// The config's name for the token asked with, `host:login`: who the
+    /// token belongs to, read with it, and unmoved by anything but a sign-in.
+    signer: String,
     sessions: i64,
     events: i64,
     /// None until an event has been read - a locked store and an empty one
@@ -134,12 +137,15 @@ pub fn quota_window(reset_ts: Option<f64>) -> Option<(String, f64)> {
 /// That file is JSON with `//` comments on top, which a JSON parser
 /// refuses, so the comments come off first. Keyed by host and login,
 /// because one machine can be signed in to github.com and an Enterprise
-/// host at once.
-pub fn copilot_token() -> Option<String> {
-    token_in(&std::fs::read_to_string(copilot_config()).ok()?)
+/// host at once. Read with the name it is kept under, from one read of the
+/// config, so the token and the sign-in it names always describe one.
+#[cfg(test)]
+fn token_in(raw: &str) -> Option<String> {
+    entry_in(raw).map(|(_, tok)| tok)
 }
 
-fn token_in(raw: &str) -> Option<String> {
+/// The token and the name it is kept under (`host:login`).
+fn entry_in(raw: &str) -> Option<(String, String)> {
     let clean: String = raw
         .lines()
         .map(|line| if line.trim_start().starts_with("//") { "" } else { line })
@@ -150,7 +156,7 @@ fn token_in(raw: &str) -> Option<String> {
         .as_object()
         .into_iter()
         .flatten()
-        .find_map(|(_, tok)| tok.as_str().filter(|t| !t.is_empty()).map(String::from))
+        .find_map(|(name, tok)| tok.as_str().filter(|t| !t.is_empty()).map(|t| (name.clone(), t.to_string())))
 }
 
 /// Entitlement and quota, from the endpoint the Copilot CLI itself uses.
@@ -200,7 +206,9 @@ fn cache_key(tok: Option<&str>) -> String {
 
 pub fn read(caches: &mut Caches, _cfg: &Config) -> Data {
     let mut d = Data::default();
-    let tok = copilot_token();
+    let entry = std::fs::read_to_string(copilot_config()).ok().as_deref().and_then(entry_in);
+    d.signer = entry.as_ref().map(|(name, _)| name.clone()).unwrap_or_default();
+    let tok = entry.map(|(_, tok)| tok);
     secret(caches, tok.as_deref().unwrap_or_default());
     let key = cache_key(tok.as_deref());
     if let Some(got) = cached(caches, &key, LIVE_TTL, || copilot_live(tok.as_deref())) {
@@ -468,6 +476,13 @@ pub fn history_facts(d: &Data) -> crate::history::Facts {
         bank: None,
         why: d.live_why.clone(),
     }
+}
+
+/// Whose the token on disk is, for the history to tell a pass whose call
+/// failed after a sign-in as someone else from one after the same sign-in
+/// (OPS-309): the live `login` is gone with the call, the entry's name is not.
+pub fn history_signer(d: &Data) -> String {
+    d.signer.clone()
 }
 
 /// Which subscription this quota belongs to, and since when.
@@ -1044,6 +1059,16 @@ mod tests {
                    {\n  \"copilotTokens\": {\n    \"github.example\": \"tok_invented_0000\"\n  },\n\
                    \"theme\": \"auto\"\n}\n";
         assert_eq!(token_in(raw), Some("tok_invented_0000".into()));
+    }
+
+    #[test]
+    fn the_token_comes_with_the_name_it_is_kept_under() {
+        let raw = "{\"copilotTokens\": {\"github.example:someone\": \"tok_invented_0000\"}}";
+        assert_eq!(
+            entry_in(raw),
+            Some(("github.example:someone".into(), "tok_invented_0000".into()))
+        );
+        assert_eq!(entry_in("{\"copilotTokens\": {\"github.example:someone\": \"\"}}"), None);
     }
 
     #[test]

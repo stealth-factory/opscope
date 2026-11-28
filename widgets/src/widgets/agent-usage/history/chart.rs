@@ -143,6 +143,10 @@ pub struct PoolHistory {
     /// When the first of them started, or the first reading.
     pub since: Option<f64>,
     pub body: Body,
+    /// An overage or balance pool's newest long spend brackets, with what
+    /// this machine's agent logs say about each (§6.3, source 3). Empty for
+    /// a provider with no local agent.
+    pub brackets: Vec<super::local::Bracket>,
 }
 
 /// One tab's history.
@@ -260,7 +264,11 @@ impl History {
             total: 0,
             since: None,
             body: Body::Cycles(Vec::new()),
+            brackets: Vec::new(),
         };
+        if role != Role::Included && super::local::Agent::of(provider).is_some() {
+            out.brackets = self.long_brackets(provider, account_key, &row.key)?;
+        }
         match role {
             Role::Balance => {
                 // A pool read only ever empty (Perplexity records an empty
@@ -439,7 +447,11 @@ pub fn gather(h: &History, obs: &[Observation], t: &Thresholds) -> Result<HashMa
     for o in obs {
         // The keys the recorder wrote under: an outage reading with no id
         // maps to the account last seen, and a unified plan's copy to its own.
-        let own = h.account_key_of(o);
+        // One whose credential now names someone else was filed under no
+        // account, so no account's history is drawn for it.
+        let Some(own) = h.account_key_of(o) else {
+            continue;
+        };
         let (provider, key) = match h.spacexsi_key_of(o) {
             Some(k) => ("spacexsi".to_string(), k),
             None => (o.provider.clone(), own.clone()),
@@ -489,6 +501,8 @@ mod tests {
             reset_at: None,
             source: Source::Live,
             spacexsi: None,
+            grant_left: None,
+            grant_total: None,
         }
     }
 
