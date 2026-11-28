@@ -1964,7 +1964,14 @@ mix. A provider that sends no account id (Antigravity, Perplexity) is kept
 under the configured profile instead, or the default one, so two accounts
 signed in one after the other under the same profile share that profile's
 history. On the unified Cursor and Grok plan the history is kept under
-SpaceXSI as well as under each product.
+SpaceXSI as well as under each product. While Grok is on the plan alone its
+SpaceXSI history is kept under Grok's account; the first time the two share
+it, that history moves into the shared plan's, and it is never moved back,
+because the shared history cannot say which of its readings were taken alone.
+A Copilot reading that comes without an account id - the id arrives with the
+live answer, so a reading during an outage has none - is filed under the
+account last seen, unless the credential says it was signed in as someone else
+since: then it is not recorded at all.
 
 From the readings it works out each cycle: where it began and ended, whether
 the next began where the last ended or at first use after a gap, how much of
